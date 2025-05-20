@@ -23,11 +23,11 @@ app = FastAPI()
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-RENDER_URL = os.getenv('RENDER_URL')  # Render app URL, e.g., https://pets-tracker-1-2.onrender.com
+RENDER_URL = os.getenv('RENDER_URL')  # Render app URL, e.g., https://pets-tracker.onrender.com
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 PETS_BSC_ADDRESS = os.getenv('PETS_BSC_ADDRESS') or '0x2466858ab5edad0bb597fe9f008f568b00d25fe3'
-PORT = int(os.getenv('PORT', 8080))  # Dynamic port from environment
+PORT = int(os.getenv('PORT', 8080))  # Fixed port for single bot
 
 # Validate environment variables
 missing_vars = []
@@ -49,7 +49,7 @@ logger.info(f"Environment variables loaded: RENDER_URL={RENDER_URL}, TELEGRAM_BO
 
 # Constants
 PANCAKESWAP_ROUTER = '0x10ED43C718714eb63d5aA57B78B54704E256024E'
-PAIR_ADDRESS = '0xYourPetsBnbPairAddress'  # TODO: Replace with $PETS/BNB pair address
+PAIR_ADDRESS = '0xYourPetsBnbPairAddress'  # Replace with the actual $PETS/BNB pair address
 PAIR_ABI = [
     {
         "constant": True,
@@ -439,7 +439,7 @@ async def test(update, context):
         await context.bot.send_message(chat_id, "🚀 **Test $PETS buy executed successfully!**")
     except Exception as e:
         logger.error(f"Error in /test: {e}")
-        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+        recent_errors.append({'time': datetime.now().isoformat(), 'error': f"Test failed: {e}"})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 **Error executing test command.**")
@@ -471,7 +471,7 @@ async def no_video(update, context):
         await context.bot.send_message(chat_id, message, parse_mode='MarkdownV2')
     except Exception as e:
         logger.error(f"Error in /noV: {e}")
-        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+        recent_errors.append({'time': datetime.now().isoformat(), 'error': f"NoV failed: {e}"})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 **Error executing /noV command.**")
