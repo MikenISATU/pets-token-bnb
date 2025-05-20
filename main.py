@@ -3,6 +3,7 @@ import json
 import logging
 import urllib.request  # Replace requests with urllib.request
 from web3 import Web3
+print("Web3 imported successfully")
 from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
 import asyncio
