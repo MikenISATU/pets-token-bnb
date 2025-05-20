@@ -1,9 +1,9 @@
 import os
-os.environ["PORT"] = "4000"
+os.environ["PORT"] = "8080"
 os.environ["TELEGRAM_BOT_TOKEN"] = "7347310243:AAEp5T0YmOu0EYcDiF-hLIUthPAoz6lG-P0"
 os.environ["BSCSCAN_API_KEY"] = "N4IZ37UXDV8985HCZZFQGHCFFHMSNYUKHQ"
 os.environ["CLOUDINARY_CLOUD_NAME"] = "da4k3yxhu"
-os.environ["RENDER_URL"] = "https://pets-tracker-1-2.onrender.com"  # Update after deployment
+os.environ["RENDER_URL"] = "https://pets-token-bnb.onrender.com"  # Updated to match deployment
 os.environ["ADMIN_CHAT_ID"] = "1888498588"
 os.environ["PETS_BSC_ADDRESS"] = "0x2466858ab5edad0bb597fe9f008f568b00d25fe3"
 from main import app
