@@ -1,1 +1,2 @@
 web: python run_bot1.py
+web: uvicorn main:app --host 0.0.0.0 --port $PORT
