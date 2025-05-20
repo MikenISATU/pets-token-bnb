@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-import requests
+import urllib.request  # Replace requests with urllib.request
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
@@ -123,9 +123,10 @@ async def fetch_prices():
         logger.info("Returning cached prices")
         return cached_prices
     try:
-        response = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin,micropets&vs_currencies=usd', timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        with urllib.request.urlopen('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin,micropets&vs_currencies=usd', timeout=10) as response:
+            if response.getcode() != 200:
+                raise ValueError(f"HTTP error: {response.getcode()}")
+            data = json.loads(response.read().decode())
         cached_prices.update({
             'bnbPrice': data.get('binancecoin', {}).get('usd', 600),
             'petsPrice': data.get('micropets', {}).get('usd', 0.0001)
@@ -155,12 +156,11 @@ async def get_market_cap():
     if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION:
         return cached_market_cap
     try:
-        response = requests.get(
-            f"https://api.bscscan.com/api?module=stats&action=tokensupply&contractaddress={PETS_BSC_ADDRESS}&apikey={BSCSCAN_API_KEY}",
-            timeout=30
-        )
-        response.raise_for_status()
-        data = response.json()
+        url = f"https://api.bscscan.com/api?module=stats&action=tokensupply&contractaddress={PETS_BSC_ADDRESS}&apikey={BSCSCAN_API_KEY}"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            if response.getcode() != 200:
+                raise ValueError(f"HTTP error: {response.getcode()}")
+            data = json.loads(response.read().decode())
         if data['status'] == '1':
             total_supply = w3.from_wei(int(data['result']), 'ether')
             prices = await get_pancake_swap_price()
@@ -226,12 +226,11 @@ async def fetch_bscscan_transactions():
         logger.info("Returning cached BscScan transactions")
         return transaction_cache
     try:
-        response = requests.get(
-            f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={PETS_BSC_ADDRESS}&sort=desc&limit=10&apikey={BSCSCAN_API_KEY}",
-            timeout=30
-        )
-        response.raise_for_status()
-        data = response.json()
+        url = f"https://api.bscscan.com/api?module=account&action=tokentx&contractaddress={PETS_BSC_ADDRESS}&sort=desc&limit=10&apikey={BSCSCAN_API_KEY}"
+        with urllib.request.urlopen(url, timeout=30) as response:
+            if response.getcode() != 200:
+                raise ValueError(f"HTTP error: {response.getcode()}")
+            data = json.loads(response.read().decode())
         if data['status'] == '1':
             transaction_cache = [
                 {
@@ -248,7 +247,7 @@ async def fetch_bscscan_transactions():
             return transaction_cache
         raise ValueError("Invalid BscScan response")
     except Exception as e:
-        if isinstance(e, requests.HTTPError) and e.response.status_code == 429:
+        if isinstance(e, ValueError) and "HTTP error: 429" in str(e):
             logger.warning("BscScan rate limit hit, using cached transactions")
             return transaction_cache or []
         logger.error(f"Error fetching BscScan transactions: {e}")
