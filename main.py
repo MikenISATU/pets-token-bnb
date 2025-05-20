@@ -1,9 +1,6 @@
 import os
 import json
 import logging
-from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler
 import requests
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -11,23 +8,21 @@ from dotenv import load_dotenv
 import asyncio
 from datetime import datetime
 import random
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# FastAPI app for webhooks
-app = FastAPI()
-
 # Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-RENDER_URL = os.getenv('RENDER_URL')  # Render app URL, e.g., https://pets-tracker.onrender.com
+RENDER_URL = os.getenv('RENDER_URL')  # Render app URL, e.g., https://pets-token-bnb.onrender.com
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 ADMIN_CHAT_ID = os.getenv('ADMIN_CHAT_ID')
 PETS_BSC_ADDRESS = os.getenv('PETS_BSC_ADDRESS') or '0x2466858ab5edad0bb597fe9f008f568b00d25fe3'
-PORT = int(os.getenv('PORT', 8080))  # Fixed port for single bot
 
 # Validate environment variables
 missing_vars = []
@@ -45,7 +40,7 @@ if missing_vars:
     logger.error(f"Missing critical environment variables: {', '.join(missing_vars)}")
     raise SystemExit(1)
 
-logger.info(f"Environment variables loaded: RENDER_URL={RENDER_URL}, TELEGRAM_BOT_TOKEN=****, BSCSCAN_API_KEY=****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, PETS_BSC_ADDRESS={PETS_BSC_ADDRESS}, PORT={PORT}")
+logger.info(f"Environment variables loaded: RENDER_URL={RENDER_URL}, TELEGRAM_BOT_TOKEN=****, BSCSCAN_API_KEY=****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, PETS_BSC_ADDRESS={PETS_BSC_ADDRESS}")
 
 # Constants
 PANCAKESWAP_ROUTER = '0x10ED43C718714eb63d5aA57B78B54704E256024E'
@@ -259,7 +254,7 @@ async def fetch_bscscan_transactions():
         logger.error(f"Error fetching BscScan transactions: {e}")
         return transaction_cache or []
 
-async def send_video_with_retry(context, chat_id, video_url, options, max_retries=5, delay=2):
+async def send_video_with_retry(context: ContextTypes.DEFAULT_TYPE, chat_id, video_url, options, max_retries=5, delay=2):
     for i in range(max_retries):
         try:
             logger.info(f"Attempt {i+1}/{max_retries} to send video to chat {chat_id}")
@@ -274,17 +269,17 @@ async def send_video_with_retry(context, chat_id, video_url, options, max_retrie
 def escape_markdown(text):
     return ''.join(f"\\{c}" if c in '*_[]()~`>#+=|{}.!' else c for c in text)
 
-def is_admin(update):
+def is_admin(update: Update):
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
 
 # Command handlers
-async def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /start for chat {chat_id}")
     active_chats.add(str(chat_id))
     await context.bot.send_message(chat_id, "👋 Welcome to PETS Tracker! Use /track to start receiving buy alerts for $PETS.")
 
-async def track(update, context):
+async def track(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /track for chat {chat_id}")
     if not is_admin(update):
@@ -296,7 +291,7 @@ async def track(update, context):
     await context.bot.send_message(chat_id, "🚀 **Tracking $PETS buys started!**")
     asyncio.create_task(monitor_transactions(context))
 
-async def stop(update, context):
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /stop for chat {chat_id}")
     if not is_admin(update):
@@ -307,7 +302,7 @@ async def stop(update, context):
     is_tracking_enabled = False
     await context.bot.send_message(chat_id, "🛑 **Tracking $PETS buys stopped.**")
 
-async def stats(update, context):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /stats for chat {chat_id}")
     if not is_admin(update):
@@ -341,7 +336,7 @@ async def stats(update, context):
             recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 **Error fetching $PETS data. APIs may be down or rate-limited. Please try again later.**")
 
-async def help_command(update, context):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /help for chat {chat_id}")
     if not is_admin(update):
@@ -356,7 +351,7 @@ async def help_command(update, context):
         parse_mode='Markdown'
     )
 
-async def status(update, context):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /status for chat {chat_id}")
     if not is_admin(update):
@@ -369,7 +364,7 @@ async def status(update, context):
         parse_mode='Markdown'
     )
 
-async def volume(update, context):
+async def volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /volume for chat {chat_id}")
     if not is_admin(update):
@@ -390,7 +385,7 @@ async def volume(update, context):
             recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 **Error generating volume chart.**")
 
-async def debug(update, context):
+async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /debug for chat {chat_id}")
     if not is_admin(update):
@@ -410,7 +405,7 @@ async def debug(update, context):
     }
     await context.bot.send_message(chat_id, f"🔍 **Debug Info**\n```json\n{json.dumps(status, indent=2)}\n```", parse_mode='Markdown')
 
-async def test(update, context):
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /test for chat {chat_id}")
     if not is_admin(update):
@@ -444,7 +439,7 @@ async def test(update, context):
             recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 **Error executing test command.**")
 
-async def no_video(update, context):
+async def no_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /noV for chat {chat_id}")
     if not is_admin(update):
@@ -476,7 +471,7 @@ async def no_video(update, context):
             recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 **Error executing /noV command.**")
 
-async def monitor_transactions(context):
+async def monitor_transactions(context: ContextTypes.DEFAULT_TYPE):
     global last_tx_hash
     if not is_tracking_enabled:
         logger.info("Tracking is disabled.")
@@ -539,45 +534,26 @@ async def monitor_transactions(context):
                 recent_errors.pop(0)
         await asyncio.sleep(poll_interval)
 
-# FastAPI routes
-@app.get("/api/transactions")
-async def get_transactions():
-    logger.info("GET /api/transactions called")
-    return transactions
+async def main():
+    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
-@app.post("/webhook")
-async def webhook(request: Request):
-    logger.info("Received webhook update")
-    try:
-        update = Update.de_json(await request.json(), bot_app.bot)
-        await bot_app.process_update(update)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Failed to process webhook: {e}")
-        recent_errors.append({'time': datetime.now().isoformat(), 'error': f"Webhook failed: {e}"})
-        if len(recent_errors) > 50:
-            recent_errors.pop(0)
-        return {"status": "error"}, 500
+    # Add command handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("track", track))
+    application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("volume", volume))
+    application.add_handler(CommandHandler("debug", debug))
+    application.add_handler(CommandHandler("test", test))
+    application.add_handler(CommandHandler("noV", no_video))
 
-# Bot initialization
-bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("track", track))
-bot_app.add_handler(CommandHandler("stop", stop))
-bot_app.add_handler(CommandHandler("stats", stats))
-bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(CommandHandler("status", status))
-bot_app.add_handler(CommandHandler("volume", volume))
-bot_app.add_handler(CommandHandler("debug", debug))
-bot_app.add_handler(CommandHandler("test", test))
-bot_app.add_handler(CommandHandler("noV", no_video))
+    # Start monitoring transactions asynchronously
+    await asyncio.create_task(monitor_transactions(application))
 
-@app.on_event("startup")
-async def startup_event():
-    webhook_url = f"{RENDER_URL}/webhook"
-    await bot_app.bot.set_webhook(webhook_url)
-    logger.info(f"Webhook set to {webhook_url}")
+    # Run polling for the bot to handle commands
+    await application.run_polling()
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    asyncio.run(main())
