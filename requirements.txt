@@ -1,5 +1,4 @@
 python-telegram-bot==20.7
-requests
 python-dotenv==1.0.0
 web3==6.20.0
 tenacity==8.2.3
