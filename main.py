@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import requests
+import random  # Added for /test and /noV commands
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
@@ -31,7 +32,7 @@ app = FastAPI()
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-RENDER_URL = os.getenv('RENDER_URL')  # e.g., https://pets-tracker-1-2.onrender.com
+APP_URL = os.getenv('APP_URL')  # Changed from RENDER_URL
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 ADMIN_CHAT_ID = '1888498588'  # Updated admin ID
 TELEGRAM_CHAT_ID = '-1001523714483'  # Updated group chat ID
@@ -43,7 +44,7 @@ missing_vars = []
 for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
     (CLOUDINARY_CLOUD_NAME, 'CLOUDINARY_CLOUD_NAME'),
-    (RENDER_URL, 'RENDER_URL'),
+    (APP_URL, 'APP_URL'),  # Changed from RENDER_URL
     (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
     (PETS_BSC_ADDRESS, 'PETS_BSC_ADDRESS')
 ]:
@@ -53,7 +54,7 @@ if missing_vars:
     logger.error(f"Missing critical environment variables: {', '.join(missing_vars)}")
     raise SystemExit(1)
 
-logger.info(f"Environment variables loaded: RENDER_URL={RENDER_URL}, TELEGRAM_BOT_TOKEN=****, BSCSCAN_API_KEY=****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, PETS_BSC_ADDRESS={PETS_BSC_ADDRESS}, PORT={PORT}")
+logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=****, BSCSCAN_API_KEY=****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, PETS_BSC_ADDRESS={PETS_BSC_ADDRESS}, PORT={PORT}")
 
 # Constants
 TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4FC4D39ae6dD75b01'
@@ -658,7 +659,7 @@ bot_app.add_handler(CommandHandler("set_threshold", set_threshold))
 
 @app.on_event("startup")
 async def startup_event():
-    webhook_url = f"{RENDER_URL}/webhook"
+    webhook_url = f"{APP_URL}/webhook"  # Changed from RENDER_URL
     await bot_app.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set to {webhook_url}")
 
