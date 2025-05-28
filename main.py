@@ -78,7 +78,7 @@ is_tracking_enabled = False
 recent_errors = []
 last_transaction_fetch = 0
 TRANSACTION_CACHE_DURATION = 2 * 60 * 1000  # 2 minutes
-cached_market_cap = '$10M'
+cached_market_cap = '$10,000,000'  # Fallback with commas
 last_market_cap_fetch = 0
 MARKET_CAP_CACHE_DURATION = 5 * 60 * 1000  # 5 minutes
 posted_transactions = set()
@@ -163,26 +163,34 @@ def extract_bnb_value(transaction_soup):
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap_bscscan():
+    global last_market_cap_fetch, cached_market_cap
+    if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000':
+        return int(cached_market_cap.replace('$', '').replace(',', ''))
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
     url_mc = f'https://bscscan.com/token/{PETS_BSC_ADDRESS}'
     try:
-        response = requests.get(url_mc, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+        response = requests.get(url_mc, headers=headers, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         market_cap_element = soup.find('div', id='ContentPlaceHolder1_tr_marketcap')
         if market_cap_element:
             market_cap_text = market_cap_element.get_text(strip=True)
             market_cap_value = Decimal(market_cap_text.replace('Onchain Market Cap$', '').replace(',', '').strip())
+            cached_market_cap = f'${int(market_cap_value):,}'
+            last_market_cap_fetch = datetime.now().timestamp() * 1000
             return int(market_cap_value)
         logger.error("Market cap element not found on BscScan.")
-        return 10000000  # Fallback $10M
+        cached_market_cap = '$10,000,000'
+        return 10000000
     except Exception as e:
         logger.error(f"Error fetching market cap: {e}")
         return 10000000
 
 def check_execute_function(transaction_hash):
     transaction_url = f"https://bscscan.com/tx/{transaction_hash}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
     try:
-        response = requests.get(transaction_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
+        response = requests.get(transaction_url, headers=headers, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         bnb_value = extract_bnb_value(soup)
@@ -282,7 +290,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate):
     wallet_address = transaction['to']
     balance_before = get_balance_before_transaction(wallet_address)
     percent_increase = calculate_percent_increase(balance_before, balance_before + Decimal(pets_amount))
-    holding_change_text = f"{percent_increase:.2f}%" if percent_increase is not None else "N/A"
+    holding_change_text = f"+{percent_increase:.2f}%" if percent_increase is not None else "N/A"
     emoji_count = min(int(usd_value) // 10, 100)
     emojis = config['emoji'] * emoji_count
     tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
@@ -292,10 +300,10 @@ async def process_transaction(context, transaction, bnb_to_usd_rate):
     message = (
         f"🚀 MicroPets Buy! BNBchain 💰\n\n"
         f"{emojis}\n"
-        f"💵 BNB Value: {bnb_value:.4f} ($ {usd_value:.2f})\n"
+        f"💵 BNB Value: {bnb_value:,.4f} ($ {usd_value:,.2f})\n"
         f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={PETS_BSC_ADDRESS}): {pets_amount:,.0f}\n"
-        f"🏦 Market Cap: ${market_cap:,}\n"
-        f"🔼 Holding Change: +{holding_change_text}\n"
+        f"🏦 Market Cap: ${market_cap:,.0f}\n"
+        f"🔼 Holding Change: {holding_change_text}\n"
         f"🤑 Hodler: {shorten_address(wallet_address)}\n"
         f"[🔍 View on BscScan]({tx_url})\n\n"
         f"💰 [Staking](https://pets.micropets.io/petdex) "
@@ -329,7 +337,7 @@ async def monitor_transactions(context):
                 logger.info("No new transactions found.")
                 return
             bnb_to_usd_rate = get_bnb_to_usd()
-            for tx in txs:
+            for tx in reversed(txs):  # Process latest first
                 if last_tx_hash and tx['transactionHash'] == last_tx_hash:
                     break
                 if tx['from'].lower() != TARGET_ADDRESS.lower():
@@ -394,29 +402,30 @@ async def stats(update, context):
         if not txs:
             await context.bot.send_message(chat_id, "🚫 No recent transactions found.")
             return
-        tx = txs[0]
+        latest_tx = txs[0]  # Latest transaction
         bnb_to_usd_rate = get_bnb_to_usd()
-        is_execute, bnb_value = check_execute_function(tx['transactionHash'])
+        is_execute, bnb_value = check_execute_function(latest_tx['transactionHash'])
         if not is_execute or not bnb_value:
             await context.bot.send_message(chat_id, "🚫 Latest transaction is not an 'Execute' transaction.")
             return
-        pets_amount = float(tx['value']) / 1e18
+        pets_amount = float(latest_tx['value']) / 1e18
         usd_value = bnb_value * bnb_to_usd_rate
         market_cap = extract_market_cap_bscscan()
-        wallet_address = tx['to']
+        wallet_address = latest_tx['to']
         balance_before = get_balance_before_transaction(wallet_address)
         percent_increase = calculate_percent_increase(balance_before, balance_before + Decimal(pets_amount))
-        holding_change_text = f"{percent_increase:.2f}%" if percent_increase is not None else "N/A"
+        holding_change_text = f"+{percent_increase:.2f}%" if percent_increase is not None else "N/A"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
-        tx_url = f"https://bscscan.com/tx/{tx['transactionHash']}"
+        tx_url = f"https://bscscan.com/tx/{latest_tx['transactionHash']}"
+
         message = (
             f"🚀 MicroPets Buy! BNBchain 💰\n\n"
             f"{emojis}\n"
-            f"💵 BNB Value: {bnb_value:.4f} ($ {usd_value:.2f})\n"
+            f"💵 BNB Value: {bnb_value:,.4f} ($ {usd_value:,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={PETS_BSC_ADDRESS}): {pets_amount:,.0f}\n"
-            f"🏦 Market Cap: ${market_cap:,}\n"
-            f"🔼 Holding Change: +{holding_change_text}\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔼 Holding Change: {holding_change_text}\n"
             f"🤑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View on BscScan]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
@@ -516,7 +525,7 @@ async def test(update, context):
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
         wallet_address = f"0x{random.randrange(16**12):012x}{random.randrange(16**4):04x}"
-        emoji_count = min(int(usd_value // 10), 100)
+        emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
         market_cap = extract_market_cap_bscscan()
         holding_change_text = "N/A"
@@ -524,10 +533,10 @@ async def test(update, context):
         message = (
             f"🚀 MicroPets Buy! BNBchain 💰\n\n"
             f"{emojis}\n"
-            f"💵 BNB Value: {bnb_value:.4f} ($ {usd_value:.2f})\n"
+            f"💵 BNB Value: {bnb_value:,.4f} ($ {usd_value:,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={PETS_BSC_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"🏦 Market Cap: ${market_cap:,}\n"
-            f"🔼 Holding Change: +{holding_change_text}\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔼 Holding Change: {holding_change_text}\n"
             f"🤑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View on BscScan]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
@@ -558,7 +567,7 @@ async def no_video(update, context):
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / bnb_to_usd_rate
         wallet_address = f"0x{random.randrange(16**12):012x}{random.randrange(16**4):04x}"
-        emoji_count = min(int(usd_value // 10), 100)
+        emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
         market_cap = extract_market_cap_bscscan()
         holding_change_text = "N/A"
@@ -566,10 +575,10 @@ async def no_video(update, context):
         message = (
             f"🚀 MicroPets Buy! BNBchain 💰\n\n"
             f"{emojis}\n"
-            f"💵 BNB Value: {bnb_value:.4f} ($ {usd_value:.2f})\n"
+            f"💵 BNB Value: {bnb_value:,.4f} ($ {usd_value:,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={PETS_BSC_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"🏦 Market Cap: ${market_cap:,}\n"
-            f"🔼 Holding Change: +{holding_change_text}\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔼 Holding Change: {holding_change_text}\n"
             f"🤑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View on BscScan]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
@@ -659,11 +668,8 @@ bot_app.add_handler(CommandHandler("set_threshold", set_threshold))
 
 @app.on_event("startup")
 async def startup_event():
-    # Initialize the bot application
     await bot_app.initialize()
     logger.info("Telegram bot application initialized")
-    
-    # Set the webhook
     webhook_url = f"{APP_URL}/webhook"
     await bot_app.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set to {webhook_url}")
