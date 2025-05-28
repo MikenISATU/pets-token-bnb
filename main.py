@@ -11,10 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
 import asyncio
 from datetime import datetime
-from bs4 import BeautifulSoup
-import re
 from decimal import Decimal
-import time
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -59,7 +56,6 @@ logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKE
 
 # Constants
 TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4FC4D39ae6dD75b01'
-PANCAKESWAP_ROUTER = '0x10ED43C718714eb63d5aA57B78B54704E256024E'
 CONFIG_FILE = 'config.json'
 
 # Video mapping for Cloudinary
@@ -150,6 +146,56 @@ def get_bnb_to_usd():
         logger.error(f"Error fetching BNB price: {e}")
         return 600  # Fallback price
 
+def get_token_price():
+    try:
+        # Note: You'll need to know the CoinGecko ID for MicroPets. Assuming "micropets" (you may need to verify this ID).
+        response = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=micropets&vs_currencies=usd', timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        price = float(data.get('micropets', {}).get('usd', 0))
+        if price == 0:
+            logger.warning("Token price not found on CoinGecko, using fallback.")
+            return 0.0000001  # Fallback price per token
+        return price
+    except Exception as e:
+        logger.error(f"Error fetching token price from CoinGecko: {e}")
+        return 0.0000001  # Fallback price per token
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_token_supply():
+    url = f"https://api.bscscan.com/api?module=stats&action=tokensupply&contractaddress={PETS_BSC_ADDRESS}&apikey={BSCSCAN_API_KEY}"
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        if data['status'] == '1':
+            supply = int(data['result']) / 1e18  # Adjust for token decimals (assuming 18 decimals)
+            return supply
+        logger.error(f"API Error fetching token supply: {data['message']}")
+        return 1000000000000  # Fallback supply (1 trillion tokens)
+    except Exception as e:
+        logger.error(f"Error fetching token supply: {e}")
+        return 1000000000000  # Fallback supply
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def extract_market_cap_bscscan():
+    global last_market_cap_fetch, cached_market_cap
+    if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000':
+        return int(cached_market_cap.replace('$', '').replace(',', ''))
+    try:
+        token_supply = get_token_supply()
+        token_price = get_token_price()
+        market_cap = token_supply * token_price
+        market_cap_int = int(market_cap)
+        cached_market_cap = f'${market_cap_int:,}'
+        last_market_cap_fetch = datetime.now().timestamp() * 1000
+        logger.info(f"Calculated market cap: ${market_cap_int:,}")
+        return market_cap_int
+    except Exception as e:
+        logger.error(f"Error calculating market cap: {e}")
+        cached_market_cap = '$10,000,000'
+        return 10000000
+
 def extract_bnb_value(transaction_soup):
     potential_values = transaction_soup.find_all('span', {'data-bs-toggle': 'tooltip'})
     for value_span in potential_values:
@@ -161,32 +207,6 @@ def extract_bnb_value(transaction_soup):
                 continue
     logger.error("No valid BNB value found in transaction details.")
     return None
-
-@retry(stop=stop_after_attempt(5), wait=wait_fixed(5))  # Increased retries and delay
-def extract_market_cap_bscscan():
-    global last_market_cap_fetch, cached_market_cap
-    if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000':
-        return int(cached_market_cap.replace('$', '').replace(',', ''))
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
-    url_mc = f'https://bscscan.com/token/{PETS_BSC_ADDRESS}'
-    try:
-        response = requests.get(url_mc, headers=headers, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        market_cap_element = soup.find('div', id='ContentPlaceHolder1_tr_marketcap')
-        if market_cap_element:
-            market_cap_text = market_cap_element.get_text(strip=True)
-            market_cap_value = Decimal(market_cap_text.replace('Onchain Market Cap$', '').replace(',', '').strip())
-            cached_market_cap = f'${int(market_cap_value):,}'
-            last_market_cap_fetch = datetime.now().timestamp() * 1000
-            return int(market_cap_value)
-        logger.error("Market cap element not found on BscScan.")
-        cached_market_cap = '$10,000,000'
-        return 10000000
-    except Exception as e:
-        logger.error(f"Error fetching market cap: {e}")
-        time.sleep(5)  # Add delay before retry
-        return 10000000
 
 def check_execute_function(transaction_hash):
     transaction_url = f"https://bscscan.com/tx/{transaction_hash}"
