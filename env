@@ -7,7 +7,7 @@ BSC_URL=https://bscscan.com/token/0x2466858ab5edad0bb597fe9f008f568b00d25fe3
 INFURA_URL=https://mainnet.infura.io/v3/8fa6faa2bb0a4262a36e1454f5658173
 POLL_INTERVAL=60
 ADMIN_USER_ID=1888498588
-
+CLOUDINARY_CLOUD_NAME=da4k3yxhu
 #main_chat=-1001523714483
 
 
