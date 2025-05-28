@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import requests
-import random  # Added for /test and /noV commands
+import random
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
@@ -32,10 +32,10 @@ app = FastAPI()
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-APP_URL = os.getenv('APP_URL')  # Changed from RENDER_URL
+APP_URL = os.getenv('APP_URL')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
-ADMIN_CHAT_ID = '1888498588'  # Updated admin ID
-TELEGRAM_CHAT_ID = '-1001523714483'  # Updated group chat ID
+ADMIN_CHAT_ID = '1888498588'
+TELEGRAM_CHAT_ID = '-1001523714483'
 PETS_BSC_ADDRESS = os.getenv('PETS_BSC_ADDRESS') or '0x2466858ab5edad0bb597fe9f008f568b00d25fe3'
 PORT = int(os.getenv('PORT', 8080))
 
@@ -44,7 +44,7 @@ missing_vars = []
 for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
     (CLOUDINARY_CLOUD_NAME, 'CLOUDINARY_CLOUD_NAME'),
-    (APP_URL, 'APP_URL'),  # Changed from RENDER_URL
+    (APP_URL, 'APP_URL'),
     (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
     (PETS_BSC_ADDRESS, 'PETS_BSC_ADDRESS')
 ]:
@@ -659,9 +659,19 @@ bot_app.add_handler(CommandHandler("set_threshold", set_threshold))
 
 @app.on_event("startup")
 async def startup_event():
-    webhook_url = f"{APP_URL}/webhook"  # Changed from RENDER_URL
+    # Initialize the bot application
+    await bot_app.initialize()
+    logger.info("Telegram bot application initialized")
+    
+    # Set the webhook
+    webhook_url = f"{APP_URL}/webhook"
     await bot_app.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set to {webhook_url}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await bot_app.shutdown()
+    logger.info("Telegram bot application shut down")
 
 if __name__ == "__main__":
     import uvicorn
