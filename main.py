@@ -14,6 +14,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import re
 from decimal import Decimal
+import time
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -161,7 +162,7 @@ def extract_bnb_value(transaction_soup):
     logger.error("No valid BNB value found in transaction details.")
     return None
 
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+@retry(stop=stop_after_attempt(5), wait=wait_fixed(5))  # Increased retries and delay
 def extract_market_cap_bscscan():
     global last_market_cap_fetch, cached_market_cap
     if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000':
@@ -184,6 +185,7 @@ def extract_market_cap_bscscan():
         return 10000000
     except Exception as e:
         logger.error(f"Error fetching market cap: {e}")
+        time.sleep(5)  # Add delay before retry
         return 10000000
 
 def check_execute_function(transaction_hash):
@@ -418,6 +420,8 @@ async def stats(update, context):
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
         tx_url = f"https://bscscan.com/tx/{latest_tx['transactionHash']}"
+        category = categorize_buy(usd_value)
+        video_url = get_video_url(category)
 
         message = (
             f"🚀 MicroPets Buy! BNBchain 💰\n\n"
@@ -433,7 +437,7 @@ async def stats(update, context):
             f"🛍 [Merch](https://micropets.store/) "
             f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={PETS_BSC_ADDRESS})"
         )
-        await context.bot.send_message(chat_id, message, parse_mode='Markdown')
+        await send_video_with_retry(context, chat_id, video_url, {'caption': message, 'parse_mode': 'Markdown'})
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
