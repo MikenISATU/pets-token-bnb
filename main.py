@@ -11,6 +11,8 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
 import asyncio
 from datetime import datetime
+from bs4 import BeautifulSoup  # Added back
+import re
 from decimal import Decimal
 
 # Logging setup
@@ -148,7 +150,7 @@ def get_bnb_to_usd():
 
 def get_token_price():
     try:
-        # Note: You'll need to know the CoinGecko ID for MicroPets. Assuming "micropets" (you may need to verify this ID).
+        # Verify the correct CoinGecko ID for MicroPets
         response = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=micropets&vs_currencies=usd', timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -304,8 +306,8 @@ async def process_transaction(context, transaction, bnb_to_usd_rate):
 
     pets_amount = float(transaction['value']) / 1e18
     usd_value = bnb_value * bnb_to_usd_rate
-    if usd_value < 50:  # Minimum buy threshold
-        logger.info(f"Transaction {transaction['transactionHash']} below $50 threshold. Skipping.")
+    if usd_value < 1:  # Changed from 50 to 1
+        logger.info(f"Transaction {transaction['transactionHash']} below $1 threshold. Skipping.")
         return
 
     market_cap = extract_market_cap_bscscan()
@@ -428,7 +430,7 @@ async def stats(update, context):
         bnb_to_usd_rate = get_bnb_to_usd()
         is_execute, bnb_value = check_execute_function(latest_tx['transactionHash'])
         if not is_execute or not bnb_value:
-            await context.bot.send_message(chat_id, "🚫 Latest transaction is not an 'Execute' transaction.")
+            await context.bot.send_message(chat_id, "🚫 Latest transaction is not an 'Execute' transaction or lacks BNB value.")
             return
         pets_amount = float(latest_tx['value']) / 1e18
         usd_value = bnb_value * bnb_to_usd_rate
