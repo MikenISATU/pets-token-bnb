@@ -39,7 +39,7 @@ CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('APP_URL')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
-CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')  # Default to correct address
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
@@ -144,32 +144,16 @@ def get_bnb_to_usd():
 
 def get_token_price():
     try:
-        # Use CoinGecko by ID since contract method is deprecated
         data = cg.get_coins_markets(vs_currency='usd', ids='micropets')
         if data and len(data) > 0:
             price = float(data[0]['current_price'])
             logger.info(f"CoinGecko response for $PETS: price=${price:.10f}")
             return price
-        logger.warning("Token price not found on CoinGecko by ID, trying PancakeSwap")
+        logger.warning("Token price not found on CoinGecko by ID")
     except Exception as e:
         logger.error(f"Error fetching token price from CoinGecko: {e}")
-
-    try:
-        response = requests.get(
-            f"https://api.pancakeswap.info/api/v2/tokens/{CONTRACT_ADDRESS}",
-            timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-        price = float(data['data']['price'])
-        logger.info(f"PancakeSwap price for $PETS: ${price:.10f}")
-        if price > 0:
-            return price
-        logger.warning("Token price not found on PancakeSwap, using fallback")
-    except Exception as e:
-        logger.error(f"Error fetching token price from PancakeSwap: {e}")
-    # Fallback to CoinGecko price from image
-    return 0.000004011  # Default to $0.000004011 from the image
+    # Fallback to image price
+    return 0.000004011  # $0.000004011 from the image
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -202,7 +186,7 @@ def extract_market_cap_coingecko():
         cached_market_cap = f'${market_cap_int:,}'
         last_market_cap_cache = datetime.now().timestamp() * 1000
         logger.info(
-            f"Calculated market cap: ${market_cap_int:,} "
+            f"Calculated market cap for $PETS: ${market_cap_int:,} "
             f"(price=${price:.10f}, supply={token_supply:,.0f})"
         )
         return market_cap_int
@@ -356,10 +340,12 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
     usd_value = pets_amount * pets_price
     logger.info(
         f"Transaction {transaction['transactionHash']}: "
-        f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}"
+        f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}, "
+        f"BNB={bnb_value:.6f} (${(bnb_value * bnb_to_usd_rate):,.2f})"
     )
-    if usd_value < 1:
-        logger.info(f"Transaction {transaction['transactionHash']} below $1")
+    # Remove or adjust the $1 threshold
+    if usd_value < 0.1:  # Lower threshold to 0.1 for testing
+        logger.info(f"Transaction {transaction['transactionHash']} below threshold $0.1")
         return False
 
     market_cap = extract_market_cap_coingecko()
@@ -370,7 +356,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         balance_before + Decimal(pets_amount) if balance_before is not None else None
     )
     holding_change_text = f"+{percent_increase:.2f}%" if percent_increase else "N/A"
-    emoji_count = min(int(usd_value) // 10, 100)
+    emoji_count = min(int(usd_value) // 0.1, 100)  # Adjust based on $PETS USD value
     emojis = EMOJI * emoji_count
     tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
     category = categorize_buy(usd_value)
@@ -379,9 +365,9 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
     message = (
         f"🚀 MicroPets Buy! BNBchain 💰\n\n"
         f"{emojis}\n"
-        f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
         f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
         f"{pets_amount:,.0f} (${usd_value:,.2f})\n"
+        f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
         f"🏦 Market Cap: ${market_cap:,.0f}\n"
         f"🔼 Holding Change: {holding_change_text}\n"
         f"🤑 Hodler: {shorten_address(wallet_address)}\n"
@@ -597,7 +583,7 @@ async def test(update, context):
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(usd_value) // 10, 100)
+        emoji_count = min(int(usd_value) // 0.1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
@@ -605,9 +591,9 @@ async def test(update, context):
         message = (
             f"🚖 MicroPets Buy! Test\n\n"
             f"{emojis}\n"
-            f"💸 BNB: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
+            f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
             f"🔼 Holding: {holding_change_text}\n"
             f"🦲 Hodler: {shorten_address(wallet_address)}\n"
@@ -646,7 +632,7 @@ async def no_video(update, context):
         bnb_value = usd_value / 1000  # Simulate small BNB
         pets_price = get_token_price()
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(usd_value) // 10, 100)
+        emoji_count = min(int(usd_value) // 0.1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
@@ -654,9 +640,9 @@ async def no_video(update, context):
         message = (
             f"🚖 MicroPets Buy! BNBchain\n\n"
             f"{emojis}\n"
-            f"💸 BNB: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
+            f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
             f"🔼 Holding: {holding_change_text}\n"
             f"🦀 Hodler: {shorten_address(wallet_address)}\n"
