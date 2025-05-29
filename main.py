@@ -14,6 +14,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import re
 from decimal import Decimal
+from pycryptobot import Data  # Add PyCryptobot
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -109,6 +110,14 @@ except Exception as e:
         logger.error(f"Failed to initialize Web3 with fallback: {e}")
         raise SystemExit(1)
 
+# Initialize PyCryptobot Data
+data_config = {
+    'exchange': 'binance',  # Adjust for BSC if needed
+    'pair': f'{PETS_BSC_ADDRESS}/BNB',  # Custom pair
+    'timeframe': '1h'
+}
+data = Data(**data_config)
+
 # Helper functions
 def get_video_url(category):
     public_id = category_videos.get(category, 'micropets_big_msapxz')
@@ -179,23 +188,25 @@ def get_token_supply():
         return 1000000000000  # Fallback supply
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def extract_market_cap_bscscan():
+def extract_market_cap_pycryptobot():
     global last_market_cap_fetch, cached_market_cap
     if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000':
         return int(cached_market_cap.replace('$', '').replace(',', ''))
     try:
+        price = data.get_latest_price()
+        if not price:
+            raise ValueError("No price data from PyCryptobot")
         token_supply = get_token_supply()
-        token_price = get_token_price()
-        market_cap = token_supply * token_price
+        market_cap = token_supply * price
         market_cap_int = int(market_cap)
         cached_market_cap = f'${market_cap_int:,}'
         last_market_cap_fetch = datetime.now().timestamp() * 1000
-        logger.info(f"Calculated market cap: ${market_cap_int:,}")
+        logger.info(f"Calculated market cap via PyCryptobot: ${market_cap_int:,}")
         return market_cap_int
     except Exception as e:
-        logger.error(f"Error calculating market cap: {e}")
-        cached_market_cap = '$10,000,000'
-        return 10000000
+        logger.error(f"Error calculating market cap with PyCryptobot: {e}")
+        # Fallback to original method
+        return extract_market_cap_bscscan()
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -205,7 +216,6 @@ def get_transaction_details(transaction_hash):
         response.raise_for_status()
         data = response.json()
         if data.get('result'):
-            # Extract BNB value (value is in Wei)
             value_wei = int(data['result'].get('value', '0'), 16)
             bnb_value = float(w3.from_wei(value_wei, 'ether'))
             return bnb_value
@@ -236,13 +246,11 @@ def check_execute_function(transaction_hash):
         soup = BeautifulSoup(response.text, 'html.parser')
         bnb_value = extract_bnb_value(soup)
         execute_badge = soup.find(string=re.compile("Execute", re.IGNORECASE))
-        # If scraping fails, try API
         if not bnb_value:
             bnb_value = get_transaction_details(transaction_hash)
         return bool(execute_badge), bnb_value
     except Exception as e:
         logger.error(f"Error checking transaction {transaction_hash}: {e}")
-        # Fallback to API if scraping fails
         bnb_value = get_transaction_details(transaction_hash)
         return False, bnb_value
 
@@ -321,12 +329,10 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, chat_id=TEL
         logger.info(f"Transaction {transaction['transactionHash']} already processed. Skipping.")
         return False
 
-    # Check if it's a buy (from target address)
     if transaction['from'].lower() != TARGET_ADDRESS.lower():
         logger.info(f"Transaction {transaction['transactionHash']} is not from target address. Skipping.")
         return False
 
-    # Get BNB value (Execute check is optional)
     is_execute, bnb_value = check_execute_function(transaction['transactionHash'])
     if not bnb_value:
         logger.info(f"Transaction {transaction['transactionHash']} lacks BNB value. Skipping.")
@@ -334,11 +340,11 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, chat_id=TEL
 
     pets_amount = float(transaction['value']) / 1e18
     usd_value = bnb_value * bnb_to_usd_rate
-    if usd_value < 1:  # Minimum buy threshold
+    if usd_value < 1:
         logger.info(f"Transaction {transaction['transactionHash']} below $1 threshold. Skipping.")
         return False
 
-    market_cap = extract_market_cap_bscscan()
+    market_cap = extract_market_cap_pycryptobot()
     wallet_address = transaction['to']
     balance_before = get_balance_before_transaction(wallet_address)
     percent_increase = calculate_percent_increase(balance_before, balance_before + Decimal(pets_amount))
@@ -391,7 +397,7 @@ async def monitor_transactions(context):
                 logger.info("No new transactions found.")
                 return
             bnb_to_usd_rate = get_bnb_to_usd()
-            for tx in reversed(txs):  # Process latest first
+            for tx in reversed(txs):
                 if last_tx_hash and tx['transactionHash'] == last_tx_hash:
                     break
                 if tx['transactionHash'] in posted_transactions:
@@ -454,7 +460,6 @@ async def stats(update, context):
             await context.bot.send_message(chat_id, "🚫 No recent transactions found.")
             return
         bnb_to_usd_rate = get_bnb_to_usd()
-        # Find the latest buy transaction
         for tx in txs:
             if await process_transaction(context, tx, bnb_to_usd_rate, chat_id=chat_id):
                 break
@@ -553,7 +558,7 @@ async def test(update, context):
         wallet_address = f"0x{random.randrange(16**12):012x}{random.randrange(16**4):04x}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
-        market_cap = extract_market_cap_bscscan()
+        market_cap = extract_market_cap_pycryptobot()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
@@ -595,7 +600,7 @@ async def no_video(update, context):
         wallet_address = f"0x{random.randrange(16**12):012x}{random.randrange(16**4):04x}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
-        market_cap = extract_market_cap_bscscan()
+        market_cap = extract_market_cap_pycryptobot()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
