@@ -16,6 +16,7 @@ from decimal import Decimal
 import json
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 import time
 
 # Logging setup
@@ -122,7 +123,7 @@ except Exception as e:
 # Selenium setup for dynamic scraping
 chrome_options = Options()
 chrome_options.add_argument("--headless")
-driver = webdriver.Chrome(options=chrome_options)
+driver = webdriver.Chrome(options=chrome_options, service=webdriver.chrome.service.Service(ChromeDriverManager().install()))
 
 # Helper functions
 def get_video_url(category):
