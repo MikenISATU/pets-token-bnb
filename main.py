@@ -14,6 +14,9 @@ from bs4 import BeautifulSoup
 import re
 from decimal import Decimal
 import json
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+import time
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -116,6 +119,11 @@ except Exception as e:
         logger.error(f"Failed to initialize Web3 with fallback: {e}")
         raise SystemExit(1)
 
+# Selenium setup for dynamic scraping
+chrome_options = Options()
+chrome_options.add_argument("--headless")
+driver = webdriver.Chrome(options=chrome_options)
+
 # Helper functions
 def get_video_url(category):
     public_id = cloudinary_videos.get(category, 'micropets_big_msapxz')
@@ -160,6 +168,37 @@ def get_bnb_to_usd():
         logger.error(f"Error fetching BNB price: {e}")
         return 600  # Fallback price
 
+def get_dextools_data():
+    url = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01"
+    try:
+        driver.get(url)
+        time.sleep(5)  # Wait for dynamic content to load
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # Extract latest buy price and USD value
+        trade_rows = soup.find_all('li', class_='ngcontent-ng-c3746536812')
+        if trade_rows:
+            latest_buy = trade_rows[0]
+            usd_value = float(latest_buy.find('span', class_='ngcontent-ng-c16728904').text.replace('$', '').replace(',', ''))
+            bnb_price = float(latest_buy.find_all('span', class_='ngcontent-ng-c16728904')[1].text)
+            logger.info(f"Scraped latest buy: USD={usd_value:.4f}, BNB={bnb_price:.6f}")
+        else:
+            usd_value, bnb_price = None, None
+            logger.warning("No trade history found on DexTools")
+
+        # Extract market cap
+        market_cap_elem = soup.find('span', class_='ngcontent-ng-c16728904', string=re.compile(r'\d'))
+        market_cap = float(market_cap_elem.text.replace('$', '').replace(',', '')) if market_cap_elem else None
+        if market_cap:
+            logger.info(f"Scraped market cap: ${market_cap:,.0f}")
+        else:
+            logger.warning("Market cap not found on DexTools")
+
+        return usd_value, bnb_price, market_cap
+    except Exception as e:
+        logger.error(f"Error scraping DexTools: {e}")
+        return None, None, None
+
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_pancakeswap():
     try:
@@ -175,21 +214,13 @@ def get_pets_price_from_pancakeswap():
         return pets_price_usd
     except Exception as e:
         logger.error(f"Error fetching $PETS price from PancakeSwap: {e}")
-        try:
-            # Fallback to CoinGecko
-            response = requests.get(
-                'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=micropets',
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            if data and len(data) > 0:
-                price = float(data[0]['current_price'])
-                logger.info(f"CoinGecko fallback price for $PETS: ${price:.10f}")
-                return price
-            logger.warning("Token price not found on CoinGecko by ID")
-        except Exception as e:
-            logger.error(f"Error fetching token price from CoinGecko: {e}")
+        # Fallback to DexTools
+        _, bnb_price, _ = get_dextools_data()
+        if bnb_price:
+            bnb_to_usd = get_bnb_to_usd()
+            pets_price_usd = bnb_price * bnb_to_usd
+            logger.info(f"Fallback $PETS price from DexTools: ${pets_price_usd:.10f}")
+            return pets_price_usd
         return 0.000004011  # Final fallback
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
@@ -228,7 +259,14 @@ def extract_market_cap():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        return 401073  # Fallback
+        # Fallback to DexTools
+        _, _, market_cap = get_dextools_data()
+        if market_cap:
+            cached_market_cap = f'${market_cap:,.0f}'
+            last_market_cap_cache = datetime.now().timestamp() * 1000
+            logger.info(f"Fallback market cap from DexTools: ${market_cap:,.0f}")
+            return market_cap
+        return 401073  # Final fallback
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -736,6 +774,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    driver.quit()  # Close Selenium driver on shutdown
     await bot_app.shutdown()
     logger.info("Bot shutdown")
 
