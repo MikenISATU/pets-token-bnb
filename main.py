@@ -14,7 +14,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import re
 from decimal import Decimal
-from pycryptobot import Data  # Add PyCryptobot
+from pycoingecko import CoinGeckoAPI
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +28,9 @@ telegram_logger.setLevel(logging.WARNING)
 
 # FastAPI app for webhooks
 app = FastAPI()
+
+# Initialize CoinGecko client
+cg = CoinGeckoAPI()
 
 # Load environment variables
 load_dotenv()
@@ -110,14 +113,6 @@ except Exception as e:
         logger.error(f"Failed to initialize Web3 with fallback: {e}")
         raise SystemExit(1)
 
-# Initialize PyCryptobot Data
-data_config = {
-    'exchange': 'binance',  # Adjust for BSC if needed
-    'pair': f'{PETS_BSC_ADDRESS}/BNB',  # Custom pair
-    'timeframe': '1h'
-}
-data = Data(**data_config)
-
 # Helper functions
 def get_video_url(category):
     public_id = category_videos.get(category, 'micropets_big_msapxz')
@@ -149,9 +144,7 @@ def log_posted_transaction(transaction_hash):
 
 def get_bnb_to_usd():
     try:
-        response = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd', timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = cg.get_price(ids='binancecoin', vs_currencies='usd')
         return float(data['binancecoin']['usd'])
     except Exception as e:
         logger.error(f"Error fetching BNB price: {e}")
@@ -159,10 +152,9 @@ def get_bnb_to_usd():
 
 def get_token_price():
     try:
-        response = requests.get('https://api.coingecko.com/api/v3/simple/price?ids=micropets&vs_currencies=usd', timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        price = float(data.get('micropets', {}).get('usd', 0))
+        # Use contract address for BSC tokens
+        data = cg.get_coin_by_contract(contract_address=PETS_BSC_ADDRESS, platform_id='binance-smart-chain')
+        price = float(data.get('market_data', {}).get('current_price', {}).get('usd', 0))
         if price == 0:
             logger.warning("Token price not found on CoinGecko, using fallback.")
             return 0.0000001  # Fallback price per token
@@ -188,25 +180,24 @@ def get_token_supply():
         return 1000000000000  # Fallback supply
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def extract_market_cap_pycryptobot():
+def extract_market_cap_coingecko():
     global last_market_cap_fetch, cached_market_cap
     if datetime.now().timestamp() * 1000 - last_market_cap_fetch < MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000':
         return int(cached_market_cap.replace('$', '').replace(',', ''))
     try:
-        price = data.get_latest_price()
+        price = get_token_price()
         if not price:
-            raise ValueError("No price data from PyCryptobot")
+            raise ValueError("No price data from CoinGecko")
         token_supply = get_token_supply()
         market_cap = token_supply * price
         market_cap_int = int(market_cap)
         cached_market_cap = f'${market_cap_int:,}'
         last_market_cap_fetch = datetime.now().timestamp() * 1000
-        logger.info(f"Calculated market cap via PyCryptobot: ${market_cap_int:,}")
+        logger.info(f"Calculated market cap via CoinGecko: ${market_cap_int:,}")
         return market_cap_int
     except Exception as e:
-        logger.error(f"Error calculating market cap with PyCryptobot: {e}")
-        # Fallback to original method
-        return extract_market_cap_bscscan()
+        logger.error(f"Error calculating market cap with CoinGecko: {e}")
+        return 10000000  # Fallback market cap (10M USD)
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -344,7 +335,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, chat_id=TEL
         logger.info(f"Transaction {transaction['transactionHash']} below $1 threshold. Skipping.")
         return False
 
-    market_cap = extract_market_cap_pycryptobot()
+    market_cap = extract_market_cap_coingecko()
     wallet_address = transaction['to']
     balance_before = get_balance_before_transaction(wallet_address)
     percent_increase = calculate_percent_increase(balance_before, balance_before + Decimal(pets_amount))
@@ -456,15 +447,25 @@ async def stats(update, context):
     await context.bot.send_message(chat_id, "⏳ Fetching $PETS transaction data...")
     try:
         txs = await fetch_bscscan_transactions()
+        logger.info(f"Fetched {len(txs)} transactions: {txs[:2]}")
         if not txs:
             await context.bot.send_message(chat_id, "🚫 No recent transactions found.")
             return
         bnb_to_usd_rate = get_bnb_to_usd()
-        for tx in txs:
+        logger.info(f"BNB to USD rate: {bnb_to_usd_rate}")
+        market_cap = extract_market_cap_coingecko()
+        logger.info(f"Market cap: ${market_cap:,}")
+        processed = 0
+        messages = []
+        for tx in txs[:5]:  # Limit to 5 transactions
+            logger.info(f"Processing transaction {tx['transactionHash']}")
             if await process_transaction(context, tx, bnb_to_usd_rate, chat_id=chat_id):
-                break
-        else:
+                processed += 1
+                messages.append(f"Processed transaction {tx['transactionHash']}")
+        if processed == 0:
             await context.bot.send_message(chat_id, "🚫 No recent buy transactions found meeting the criteria.")
+        else:
+            await context.bot.send_message(chat_id, f"✅ Processed {processed} transactions:\n" + "\n".join(messages))
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
@@ -558,7 +559,7 @@ async def test(update, context):
         wallet_address = f"0x{random.randrange(16**12):012x}{random.randrange(16**4):04x}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
-        market_cap = extract_market_cap_pycryptobot()
+        market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
@@ -597,10 +598,10 @@ async def no_video(update, context):
         usd_value = random.uniform(50, 2000)
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / bnb_to_usd_rate
-        wallet_address = f"0x{random.randrange(16**12):012x}{random.randrange(16**4):04x}"
+        wallet_address = ''.join(f"0x{random.randrange(16**12):012x}{random.randint(16**range,4):04x}")
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
-        market_cap = extract_market_cap_pycryptobot()
+        market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
@@ -611,7 +612,7 @@ async def no_video(update, context):
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
             f"🔼 Holding Change: {holding_change_text}\n"
             f"🤑 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍 View on BscScan]({tx_url})\n\n"
+            f"[🔍 View on BscScan]({tx_url})\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
             f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
             f"🛍 [Merch](https://micropets.store/) "
