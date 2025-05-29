@@ -39,7 +39,7 @@ CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('APP_URL')
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
-CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS')
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')  # Default to correct address
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
@@ -144,15 +144,13 @@ def get_bnb_to_usd():
 
 def get_token_price():
     try:
-        data = cg.get_coin_by_contract(
-            contract_address=CONTRACT_ADDRESS,
-            platform_id='binance-smart-chain'
-        )
-        price = float(data.get('market_data', {}).get('current_price', {}).get('usd', 0))
-        logger.info(f"CoinGecko response for $PETS: price=${price:.10f}")
-        if price > 0:
+        # Use CoinGecko by ID since contract method is deprecated
+        data = cg.get_coins_markets(vs_currency='usd', ids='micropets')
+        if data and len(data) > 0:
+            price = float(data[0]['current_price'])
+            logger.info(f"CoinGecko response for $PETS: price=${price:.10f}")
             return price
-        logger.warning("Token price not found on CoinGecko, trying PancakeSwap")
+        logger.warning("Token price not found on CoinGecko by ID, trying PancakeSwap")
     except Exception as e:
         logger.error(f"Error fetching token price from CoinGecko: {e}")
 
@@ -170,7 +168,8 @@ def get_token_price():
         logger.warning("Token price not found on PancakeSwap, using fallback")
     except Exception as e:
         logger.error(f"Error fetching token price from PancakeSwap: {e}")
-    return 0.0000001  # Fallback price
+    # Fallback to CoinGecko price from image
+    return 0.000004011  # Default to $0.000004011 from the image
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -181,13 +180,13 @@ def get_token_supply():
         data = response.json()
         if data['status'] == '1':
             supply = int(data['result']) / 1e18
-            logger.info(f"Fetched token supply: {supply:,.0f} tokens")
+            logger.info(f"Fetched token supply from BscScan: {supply:,.0f} tokens")
             return supply
         logger.error(f"API Error fetching token supply: {data['message']}")
-        return 1000000000000  # Fallback supply (1 trillion)
     except Exception as e:
-        logger.error(f"Error fetching token supply: {e}")
-        return 1000000000000
+        logger.error(f"Error fetching token supply from BscScan: {e}")
+    # Fallback to CoinGecko total supply
+    return 10000000000  # 10,000,000,000 from the image
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap_coingecko():
@@ -209,7 +208,7 @@ def extract_market_cap_coingecko():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        return 10000000  # Fallback market cap
+        return 401073  # Fallback to Fully Diluted Valuation from image ($401,073)
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
