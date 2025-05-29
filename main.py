@@ -13,7 +13,6 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import re
 from decimal import Decimal
-from pycoingecko import CoinGeckoAPI
 import json
 
 # Logging setup
@@ -28,9 +27,6 @@ telegram_logger.setLevel(logging.WARNING)
 
 # FastAPI app for webhooks
 app = FastAPI()
-
-# Initialize CoinGecko client
-cg = CoinGeckoAPI()
 
 # Load environment variables
 load_dotenv()
@@ -67,6 +63,23 @@ logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKE
 # Constants
 TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'
 EMOJI = '💰'
+
+# PancakeSwap Pair ABI
+PANCAKESWAP_PAIR_ABI = [
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "getReserves",
+        "outputs": [
+            {"internalType": "uint112", "name": "_reserve0", "type": "uint112"},
+            {"internalType": "uint112", "name": "_reserve1", "type": "uint112"},
+            {"internalType": "uint32", "name": "_blockTimestampLast", "type": "uint32"}
+        ],
+        "payable": False,
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
 
 # Video mapping for Cloudinary
 cloudinary_videos = {
@@ -132,28 +145,52 @@ def log_posted_transaction(transaction_hash):
     with open('posted_transactions.txt', 'a') as f:
         f.write(transaction_hash + '\n')
 
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_bnb_to_usd():
     try:
-        data = cg.get_price(ids='binancecoin', vs_currencies='usd')
-        price = float(data['binancecoin']['usd'])
+        response = requests.get(
+            'https://api.coingecko.com/api/v3/simple/price?ids=binancecoin&vs_currencies=usd',
+            timeout=10
+        )
+        response.raise_for_status()
+        price = float(response.json()['binancecoin']['usd'])
         logger.info(f"Fetched BNB price: ${price:.2f}")
         return price
     except Exception as e:
         logger.error(f"Error fetching BNB price: {e}")
         return 600  # Fallback price
 
-def get_token_price():
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_pets_price_from_pancakeswap():
     try:
-        data = cg.get_coins_markets(vs_currency='usd', ids='micropets')
-        if data and len(data) > 0:
-            price = float(data[0]['current_price'])
-            logger.info(f"CoinGecko response for $PETS: price=${price:.10f}")
-            return price
-        logger.warning("Token price not found on CoinGecko by ID")
+        pair_address = TARGET_ADDRESS  # $PETS/BNB pair
+        pair_contract = w3.eth.contract(address=pair_address, abi=PANCAKESWAP_PAIR_ABI)
+        reserves = pair_contract.functions.getReserves().call()
+        reserve0, reserve1, _ = reserves
+        # Assuming $PETS is token0, BNB is token1
+        bnb_per_pets = reserve1 / reserve0 / 1e18  # BNB per $PETS
+        bnb_to_usd = get_bnb_to_usd()
+        pets_price_usd = bnb_per_pets * bnb_to_usd
+        logger.info(f"Fetched $PETS price from PancakeSwap: ${pets_price_usd:.10f}")
+        return pets_price_usd
     except Exception as e:
-        logger.error(f"Error fetching token price from CoinGecko: {e}")
-    # Fallback to image price
-    return 0.000004011  # $0.000004011 from the image
+        logger.error(f"Error fetching $PETS price from PancakeSwap: {e}")
+        try:
+            # Fallback to CoinGecko
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=micropets',
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data and len(data) > 0:
+                price = float(data[0]['current_price'])
+                logger.info(f"CoinGecko fallback price for $PETS: ${price:.10f}")
+                return price
+            logger.warning("Token price not found on CoinGecko by ID")
+        except Exception as e:
+            logger.error(f"Error fetching token price from CoinGecko: {e}")
+        return 0.000004011  # Final fallback
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -169,17 +206,16 @@ def get_token_supply():
         logger.error(f"API Error fetching token supply: {data['message']}")
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
-    # Fallback to CoinGecko total supply
-    return 10000000000  # 10,000,000,000 from the image
+    return 10000000000  # Fallback
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def extract_market_cap_coingecko():
+def extract_market_cap():
     global last_market_cap_cache, cached_market_cap
     if (datetime.now().timestamp() * 1000 - last_market_cap_cache <
             MARKET_CAP_CACHE_DURATION and cached_market_cap != '$10,000,000'):
         return int(cached_market_cap.replace('$', '').replace(',', ''))
     try:
-        price = get_token_price()
+        price = get_pets_price_from_pancakeswap()
         token_supply = get_token_supply()
         market_cap = token_supply * price
         market_cap_int = int(market_cap)
@@ -192,7 +228,7 @@ def extract_market_cap_coingecko():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        return 401073  # Fallback to Fully Diluted Valuation from image ($401,073)
+        return 401073  # Fallback
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -343,12 +379,11 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}, "
         f"BNB={bnb_value:.6f} (${(bnb_value * bnb_to_usd_rate):,.2f})"
     )
-    # Remove or adjust the $1 threshold
-    if usd_value < 0.1:  # Lower threshold to 0.1 for testing
-        logger.info(f"Transaction {transaction['transactionHash']} below threshold $0.1")
+    if usd_value < 50:  # Increased threshold to $50
+        logger.info(f"Transaction {transaction['transactionHash']} below threshold $50")
         return False
 
-    market_cap = extract_market_cap_coingecko()
+    market_cap = extract_market_cap()
     wallet_address = transaction['to']
     balance_before = get_balance_before_transaction(wallet_address, transaction['blockNumber'])
     percent_increase = calculate_percent_increase(
@@ -356,7 +391,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         balance_before + Decimal(pets_amount) if balance_before is not None else None
     )
     holding_change_text = f"+{percent_increase:.2f}%" if percent_increase else "N/A"
-    emoji_count = min(int(usd_value) // 0.1, 100)  # Adjust based on $PETS USD value
+    emoji_count = min(int(usd_value) // 50, 100)  # Adjust based on $50 increments
     emojis = EMOJI * emoji_count
     tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
     category = categorize_buy(usd_value)
@@ -404,24 +439,32 @@ async def monitor_transactions(context):
         if not is_tracking_enabled:
             logger.info("Tracking disabled")
             return
+        logger.info("Starting transaction monitoring")
         try:
             posted_transactions.update(load_posted_transactions())
-            logger.info("Checking for new transactions")
+            logger.info(f"Loaded {len(posted_transactions)} posted transactions")
             txs = await fetch_bscscan_transactions()
+            logger.info(f"Fetched {len(txs)} transactions")
             if not txs:
                 logger.info("No new transactions")
                 return
             bnb_to_usd_rate = get_bnb_to_usd()
-            pets_price = get_token_price()
+            pets_price = get_pets_price_from_pancakeswap()
+            logger.info(f"BNB price: ${bnb_to_usd_rate:.2f}, PETS price: ${pets_price:.10f}")
             new_last_hash = last_transaction_hash
             for tx in reversed(txs):
+                logger.info(f"Checking transaction {tx['transactionHash']}")
                 if tx['transactionHash'] in posted_transactions:
-                    logger.info(f"Skipping already processed transaction {tx['transactionHash']}")
+                    logger.info(f"Skipping processed transaction {tx['transactionHash']}")
                     continue
                 if last_transaction_hash and tx['transactionHash'] == last_transaction_hash:
+                    logger.info(f"Reached last processed transaction {last_transaction_hash}")
                     break
-                await process_transaction(context, tx, bnb_to_usd_rate, pets_price)
-                new_last_hash = tx['transactionHash']
+                if await process_transaction(context, tx, bnb_to_usd_rate, pets_price):
+                    logger.info(f"Processed transaction {tx['transactionHash']}")
+                    new_last_hash = tx['transactionHash']
+                else:
+                    logger.info(f"Skipped transaction {tx['transactionHash']} (below threshold or error)")
             if new_last_hash != last_transaction_hash:
                 last_transaction_hash = new_last_hash
                 logger.info(f"Updated last transaction: {last_transaction_hash}")
@@ -430,6 +473,7 @@ async def monitor_transactions(context):
             recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
             if len(recent_errors) > 50:
                 recent_errors.pop(0)
+        logger.info(f"Sleeping for {int(os.getenv('POLL_INTERVAL', 60))} seconds")
         await asyncio.sleep(int(os.getenv('POLL_INTERVAL', 60)))
 
 def is_admin(update):
@@ -483,12 +527,12 @@ async def stats(update, context):
             await context.bot.send_message(chat_id, "🚫 No recent buys")
             return
         bnb_to_usd_rate = get_bnb_to_usd()
-        pets_price = get_token_price()
+        pets_price = get_pets_price_from_pancakeswap()
         processed = []
         seen_hashes = set()
         for tx in reversed(txs[:5]):
-            if tx['transactionHash'] in seen_hashes or tx['transactionHash'] in posted_transactions:
-                logger.info(f"Skipping duplicate or processed transaction {tx['transactionHash']}")
+            if tx['transactionHash'] in seen_hashes:
+                logger.info(f"Skipping duplicate transaction {tx['transactionHash']}")
                 continue
             logger.info(f"Processing {tx['transactionHash']}")
             if await process_transaction(context, tx, bnb_to_usd_rate, pets_price, chat_id=chat_id):
@@ -579,13 +623,13 @@ async def test(update, context):
         usd_value = random.uniform(50, 500)
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / 1000  # Simulate small BNB
-        pets_price = get_token_price()
+        pets_price = get_pets_price_from_pancakeswap()
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(usd_value) // 0.1, 100)
+        emoji_count = min(int(usd_value) // 50, 100)
         emojis = EMOJI * emoji_count
-        market_cap = extract_market_cap_coingecko()
+        market_cap = extract_market_cap()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
@@ -630,11 +674,11 @@ async def no_video(update, context):
         usd_value = random.uniform(50, 5000)
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / 1000  # Simulate small BNB
-        pets_price = get_token_price()
+        pets_price = get_pets_price_from_pancakeswap()
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(usd_value) // 0.1, 100)
+        emoji_count = min(int(usd_value) // 50, 100)
         emojis = EMOJI * emoji_count
-        market_cap = extract_market_cap_coingecko()
+        market_cap = extract_market_cap()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
