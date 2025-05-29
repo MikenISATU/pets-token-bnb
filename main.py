@@ -14,9 +14,14 @@ from bs4 import BeautifulSoup
 import re
 from decimal import Decimal
 import json
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from webdriver_manager.chrome import ChromeDriverManager
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+    logging.warning("Selenium not available. DexTools scraping will be skipped.")
 import time
 
 # Logging setup
@@ -120,10 +125,23 @@ except Exception as e:
         logger.error(f"Failed to initialize Web3 with fallback: {e}")
         raise SystemExit(1)
 
-# Selenium setup for dynamic scraping
-chrome_options = Options()
-chrome_options.add_argument("--headless")
-driver = webdriver.Chrome(options=chrome_options, service=webdriver.chrome.service.Service(ChromeDriverManager().install()))
+# Selenium setup for dynamic scraping (if available)
+driver = None
+if SELENIUM_AVAILABLE:
+    try:
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")  # Required for some Linux environments
+        chrome_options.add_argument("--disable-dev-shm-usage")  # Prevent crashes in Docker
+        driver = webdriver.Chrome(
+            options=chrome_options,
+            service=webdriver.chrome.service.Service(ChromeDriverManager().install())
+        )
+        logger.info("Selenium WebDriver initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Selenium WebDriver: {e}")
+        SELENIUM_AVAILABLE = False
+        driver = None
 
 # Helper functions
 def get_video_url(category):
@@ -170,6 +188,10 @@ def get_bnb_to_usd():
         return 600  # Fallback price
 
 def get_dextools_data():
+    if not SELENIUM_AVAILABLE or driver is None:
+        logger.warning("Selenium not available, skipping DexTools scraping")
+        return None, None, None
+
     url = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01"
     try:
         driver.get(url)
@@ -640,7 +662,8 @@ async def debug(update, context):
             'lastTransactionFetch': (
                 datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat()
                 if last_transaction_fetch else None
-            )
+            ),
+            'seleniumAvailable': SELENIUM_AVAILABLE
         }
     }
     await context.bot.send_message(
@@ -775,7 +798,8 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    driver.quit()  # Close Selenium driver on shutdown
+    if driver:
+        driver.quit()  # Close Selenium driver on shutdown
     await bot_app.shutdown()
     logger.info("Bot shutdown")
 
