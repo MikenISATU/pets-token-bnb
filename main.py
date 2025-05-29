@@ -814,6 +814,6 @@ async def shutdown_event():
     await bot_app.shutdown()
     logger.info("Bot shutdown")
 
-if __name__ == "__main__':
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
