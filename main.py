@@ -519,9 +519,9 @@ async def stats(update, context):
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
-        if len(recent_errors) > 5:
+        if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "Failed to fetch data")
+        await context.bot.send_message(chat_id, "🚫 Failed to fetch data")
 
 async def help_command(update, context):
     chat_id = update.effective_chat.id
@@ -577,13 +577,13 @@ async def debug(update, context):
     }
     await context.bot.send_message(
         chat_id,
-        f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```python",
+        f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```",
         parse_mode='Markdown'
     )
 
 async def test(update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /test for {chat_id}")
+    logger.info(f"Processing /test for chat {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
@@ -597,14 +597,14 @@ async def test(update, context):
         pets_price = get_token_price()
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
-        wallet_address = f"0x{random.randint(10**15, 10**16):0>40}"
+        wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
-            f"🚖 MicroPets Buy! Test\n"
+            f"🚖 MicroPets Buy! Test\n\n"
             f"{emojis}\n"
             f"💸 BNB: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
@@ -616,7 +616,7 @@ async def test(update, context):
             f"[💰 Staking](https://pets.micropets.io/) "
             f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
             f"[🛍 Merch](https://micropets.store/) "
-            f"[🦗 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await send_video_with_retry(
             context,
@@ -630,15 +630,15 @@ async def test(update, context):
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "🚖 Failed")
+        await context.bot.send_message(chat_id, "🚫 Failed")
 
 async def no_video(update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /noV} for {chat_id}")
+    logger.info(f"Processing /noV for {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
-        return None
-    await context.bot.send_message(chat_id, "Testing buy (no video)")
+        return
+    await context.bot.send_message(chat_id, "⏳ Testing buy (no video)")
     try:
         test_tx_hash = '0xRandomTestNoV'
         test_pets_amount = random.randint(1000, 50000)
@@ -646,20 +646,20 @@ async def no_video(update, context):
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / 1000  # Simulate small BNB
         pets_price = get_token_price()
-        wallet_address = f"0x{random.randint(10**15, 10**16):0>40}"
-        emoji_count = min(int(usd_value)) // 10, 100)
+        wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
+        emoji_count = min(int(usd_value) // 10, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
-            f"🚖 MicroPets Buy! BNBchain\n"
-            f"{emojis}\n\n"
-            f"💸 BNB: ${bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rateぜひ): "
+            f"🚖 MicroPets Buy! BNBchain\n\n"
+            f"{emojis}\n"
+            f"💸 BNB: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n\n"
+            f"🔼 Holding: {holding_change_text}\n"
             f"🦀 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
@@ -674,7 +674,7 @@ async def no_video(update, context):
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "Failed")
+        await context.bot.send_message(chat_id, "🚫 Failed")
 
 # FastAPI routes
 @app.get("/api/transactions")
@@ -683,7 +683,7 @@ async def get_transactions():
     return transaction_cache
 
 @app.post("/webhook")
-async def post_webhook(request: Request):
+async def webhook(request: Request):
     logger.info("Received webhook")
     try:
         update = Update.de_json(await request.json(), bot_app.bot)
@@ -701,9 +701,9 @@ async def startup_event():
     await bot_app.initialize()
     logger.info("Bot initialized")
     webhook_url = f"{APP_URL}/webhook"
-    await bot_app.bot.setWebhook(webhook_url)
+    await bot_app.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set: {webhook_url}")
-    await asyncio.create_task(monitor_transactions(bot_app))
+    asyncio.create_task(monitor_transactions(bot_app))
 
 @app.on_event("shutdown")
 async def shutdown_event():
