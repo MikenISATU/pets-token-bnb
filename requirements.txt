@@ -6,3 +6,4 @@ web3==7.2.0
 tenacity==9.0.0
 python-dotenv==1.0.1
 beautifulsoup4==4.12.3
+pycryptobot
