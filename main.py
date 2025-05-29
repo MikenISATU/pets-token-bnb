@@ -69,7 +69,7 @@ TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'
 CONFIG_FILE = 'config.json'
 
 # Video mapping for Cloudinary
-category_videos = {
+cloudinary_videos = {
     'MicroPets Buy': 'SMALLBUY_b3px1p',
     'Medium Bullish Buy': 'MEDIUMBUY_MPEG_e02zdz',
     'Whale Buy': 'micropets_big_msapxz',
@@ -81,7 +81,7 @@ transactions = []
 transaction_cache = []
 active_chats = {TELEGRAM_CHAT_ID}
 last_transaction_hash = None
-is_tracking_enabled = True  # Enable tracking by default
+is_tracking_enabled = False
 recent_errors = []
 last_transaction_fetch = 0
 TRANSACTION_CACHE_DURATION = 2 * 60 * 1000  # 2 minutes
@@ -94,13 +94,13 @@ lock = asyncio.Lock()
 # Load configuration
 def load_config():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as file:
-            return json.load(file)
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
     return {'small_threshold': 100, 'medium_threshold': 500, 'large_threshold': 1000, 'emoji': '💰'}
 
 def save_config(config):
-    with open(CONFIG_FILE, 'w') as file:
-        json.dump(config, file, indent=4)
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=4)
 
 config = load_config()
 
@@ -119,7 +119,7 @@ except Exception as e:
 
 # Helper functions
 def get_video_url(category):
-    public_id = category_videos.get(category, 'micropets_big_msapxz')
+    public_id = cloudinary_videos.get(category, 'micropets_big_msapxz')
     return f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/video/upload/w_1280/{public_id}.mp4"
 
 def categorize_buy(usd_value):
@@ -139,12 +139,12 @@ def shorten_address(address):
 def load_posted_transactions():
     if not os.path.exists('posted_transactions.txt'):
         return set()
-    with open('posted_transactions.txt', 'r') as file:
-        return set(line.strip() for line in file)
+    with open('posted_transactions.txt', 'r') as f:
+        return set(line.strip() for line in f)
 
 def log_posted_transaction(transaction_hash):
-    with open('posted_transactions.txt', 'a') as file:
-        file.write(transaction_hash + '\n')
+    with open('posted_transactions.txt', 'a') as f:
+        f.write(transaction_hash + '\n')
 
 def get_bnb_to_usd():
     try:
@@ -440,7 +440,7 @@ async def track(update, context):
     active_chats.add(str(chat_id))
     global is_tracking_enabled
     is_tracking_enabled = True
-    await context.bot.send_message(chat_id, "🚀 Tracking $PETS buys started")
+    await context.bot.send_message(chat_id, "🚀 Tracking started")
     asyncio.create_task(monitor_transactions(context))
 
 async def stop(update, context):
@@ -452,22 +452,24 @@ async def stop(update, context):
     active_chats.discard(str(chat_id))
     global is_tracking_enabled
     is_tracking_enabled = False
+    logger.info("Tracking disabled")
     await context.bot.send_message(chat_id, "🛑 Tracking stopped")
 
 async def stats(update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /stats for chat {chat_id}")
+    logger.info(f"Processing /stats for {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id, "⏳ Fetching $PETS data")
     try:
         txs = await fetch_bscscan_transactions()
-        logger.info(f"Fetched {len(txs)} transactions: {txs[:2]}")
+        logger.info(f"Fetched {len(txs)} transactions: {txs[:5]}")
         if not txs:
-            await context.bot.send_message(chat_id, "🚫 No recent buys found")
+            await context.bot.send_message(chat_id, "🚫 No recent buys")
             return
         bnb_to_usd_rate = get_bnb_to_usd()
+        logger.info(f"BNB to USD rate: ${bnb_to_usd_rate:.2f}")
         market_cap = extract_market_cap_coingecko()
         processed = []
         seen_hashes = set()
@@ -482,54 +484,66 @@ async def stats(update, context):
         if not processed:
             await context.bot.send_message(chat_id, "🚫 No recent buys meet criteria")
         else:
-            await context.bot.send_message(chat_id, f"✅ Processed {len(processed)} buys:\n" + "\n".join(processed))
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Processed {len(processed)} buys:\n" + "\n".join(processed)
+            )
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "🚫 Error fetching data. Try again later.")
+        await context.bot.send_message(chat_id, "🚫 Failed to fetch data")
 
 async def help_command(update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /help for chat {chat_id}")
+    logger.info(f"Processing /help for {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id,
-        "🆘 *Commands:*\n/start - Start bot\n/track - Enable alerts\n/stop - Disable alerts\n"
-        "/stats - Latest buys\n/volume - Buy volume\n/status - Tracking status\n"
-        "/test - Sample buy\n/noV - Sample without video\n/set_emoji - Set emoji\n"
-        "/set_threshold - Set thresholds\n/debug - Bot status\n/help - This message",
+        "🆘 *Commands:*\n\n"
+        "/start - Start bot\n"
+        "/track - Enable alerts\n"
+        "/stop - Latest buys\n"
+        "/stats - View buys\n"
+        "/volume - Buy volume\n"
+        "/status - Track status\n"
+        "/test - Test tx\n"
+        "/noV - Test no video\n"
+        "/set_emoji - Set emoji\n"
+        "/set_threshold - Set thresholds\n"
+        "/debug - Debug info\n"
+        "/help - This message",
         parse_mode='Markdown'
     )
 
 async def status(update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /status for chat {chat_id}")
+    logger.info(f"Processing /status for {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id,
-        f"🔍 *Status:* {'Tracking enabled' if str(chat_id) in active_chats else 'Tracking disabled'}\n"
+        f"🔍 *Status:* {'Enabled' if str(chat_id) in active_chats else 'Disabled'}\n"
         f"*Total transactions:* {len(transactions)}",
         parse_mode='Markdown'
     )
 
-async def volume(update, context):
-    chat_id = update.effective_chat.id
-    logger.info(f"Processing /volume for chat {chat_id}")
+async def volume(update Moran, context):
+    chat_id = update.efficient_chat.id
+    logger.info(f"Processing /volume for {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id, "⏳ Generating volume chart")
+    await context.bot.send_message(chat_id, "⏳ Generating volume")
     try:
-        txs = await fetch_bscscan_transactions()
+        transactions = await fetch_bscscan_transactions()
         volume_data = [
-            {'tokens': round(float(w3.from_wei(int(tx['value']), 'ether')), 2), 'block': tx['blockNumber']}
-            for tx in txs[:5]
+            {'tokens': round(float(w3.from_wei(int(tx['value']), 'ether')), 2), 'block': str(tx['blockNumber'])}]
+            for tx in transactions[:5]
         ]
         await context.bot.send_message(chat_id, f"📊 Volume:\n{json.dumps(volume_data, indent=2)}")
     except Exception as e:
@@ -537,11 +551,11 @@ async def volume(update, context):
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "🚫 Error generating chart")
+        await context.bot.send_message(chat_id, "🚫 Failed to generate chart")
 
 async def debug(update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /debug for chat {chat_id}")
+    logger.info(f"Processing /debug for {chat_id}")
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
@@ -553,10 +567,14 @@ async def debug(update, context):
         'recentErrors': recent_errors[-5:],
         'apiStatus': {
             'bscWeb3': bool(w3),
-            'lastTransactionFetch': datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat() if last_transaction_fetch else None
+            'lastTransactionFetch': datetime.fromtimestamp(
+                last_transaction_fetch / 1000
+            ).isoformat() if last_transaction_fetch else None
         }
     }
-    await context.bot.send_message(chat_id, f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```", parse_mode='Markdown')
+    await context.bot.send_message(
+        chat_id, f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```", parse_mode='Markdown'
+    )
 
 async def test(update, context):
     chat_id = update.effective_chat.id
@@ -573,20 +591,20 @@ async def test(update, context):
         bnb_value = usd_value / bnb_to_usd_rate
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
-        wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
+        wallet_address = f"0x{random.randint(10**15, 10**16):0x40}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = config['emoji'] * emoji_count
         market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
         tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
-            f"🚀 MicroPets Buy! BNBchain\n\n"
+            f"🚀 MicroPets Buy! Test\n\n"
             f"{emojis}\n"
             f"💵 BNB: {bnb_value:.4f} ($ {usd_value:.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,}\n"
-            f"🏦 Market Cap: ${market_cap:,}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦹 Hodler: {shorten_address(wallet_address)}\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔲 Holding: {holding_change_text}\n"
+            f"🦸 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
             f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
@@ -594,10 +612,12 @@ async def test(update, context):
             f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await send_video_with_retry(context, chat_id, video_url, {'caption': message, 'parse_mode': 'Markdown'})
-        await context.bot.send_message(chat_id, "🚀 Test buy sent")
+        await context.bot.send_message(chat_id, "🚀 Test completed")
     except Exception as e:
         logger.error(f"Test error: {e}")
- hmm-        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+        if len(recent_errors) > 50:
+            recent_errors.pop(0)
         await context.bot.send_message(chat_id, "🚫 Test failed")
 
 async def no_video(update, context):
@@ -606,38 +626,41 @@ async def no_video(update, context):
     if not is_admin(update):
         await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id, "⏳ Test buy (no video)")
+    await context.bot.send_message(chat_id, "⏳ Testing buy (no video)")
     try:
-        test_tx_hash = '0xRandomNoVTest'
+        test_tx_hash = '0xRandomTestNoV'
         test_pets_amount = random.randint(1000, 50000)
-        usd_value = random.uniform(50, 2000)
+        usd_value = random.uniform(50, 5000)
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / bnb_to_usd_rate
-        wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(emojis) usd_value // 10, 100)
-        emojis = config['emoji'] * emoji_count
+        wallet_address = f"0x{random.randint(10**15, 10**16):0x40}"
+        emoji_count = min(int(USD_value) // 10, 100)
+        emojis = config(['emoji'] * emoji_count
         market_cap = extract_market_cap_coingecko()
         holding_change_text = "N/A"
-        tx_url = f"https://bscscan.com/tx/{test_tx_hash}"}
+        tx_url = f"https://bscscan.com/tx/{test_tx_hash}"
         message = (
             f"🚀 MicroPets Buy! BNBchain\n\n"
             f"{emojis}\n"
             f"💵 BNB: {bnb_value:.4f} ($ {usd_value:.2f})\n"
             f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,}\n"
-            f"🏦 Market Cap: ${market_cap:,}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦹 Hodler: {shorten_address(wallet_address)}\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔲 Holding: {holding_change_text}\n"
+            f"🦀 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
             f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
             f"[🛍 Merch](https://micropets.store/) "
-            f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={target_ADDRESS})"
         )
         await context.bot.send_message(chat_id, message, parse_mode='Markdown')
+        await context.bot.send_message(chat_id, "🚀 Test completed")
     except Exception as e:
         logger.error(f"/noV error: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
-        await context.bot.send_message(chat_id, "🚫 /noV failed")
+        if len(recent_errors) > 50:
+            recent_errors.pop(0)
+        await context.bot.send_message(chat_id, "🚫 Test failed")
 
 async def set_emoji(update, context):
     chat_id = update.effective_chat.id
@@ -651,8 +674,8 @@ async def set_emoji(update, context):
         return
     config['emoji'] = emoji
     save_config(config)
-    await context.bot.send_message(chat_id, f"Emoji set to: {emoji}")
-    logger.info(f"Emoji set to: {emoji}")
+    await context.bot.send_message(chat_id, f"Emoji set: {emoji}")
+    logger.info(f"Emoji set: {emoji}")
 
 async def set_threshold(update, context):
     chat_id = update.effective_chat.id
@@ -669,8 +692,8 @@ async def set_threshold(update, context):
         if threshold_type in ['small', 'medium', 'large']:
             config[f'{threshold_type}_threshold'] = value
             save_config(config)
-            await context.bot.send_message(chat_id, f"{threshold_type.capitalize()} threshold: {value}")
-            logger.info(f"{threshold_type.capitalize()} threshold: {value}")
+            await context.bot.send_message(chat_id, f"{threshold_type.capitalize()}: {value}")
+            logger.info(f"{threshold_type.capitalize()}: {value}")
         else:
             await context.bot.send_message(chat_id, "🚫 Invalid type")
     except ValueError:
@@ -679,7 +702,7 @@ async def set_threshold(update, context):
 # FastAPI routes
 @app.get("/api/transactions")
 async def get_transactions():
-    logger.info("GET /api/transactions")
+    logger.info("GET /transactions")
     return transactions
 
 @app.post("/webhook")
@@ -691,7 +714,7 @@ async def webhook(request: Request):
         return {"status": "OK"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        recent_errors.append({'time': datetime.now().isoformat(), 'error': f"Webhook: {e}"})
+        recent_errors.append({'time': datetime.now().isoformat(), 'error': f"Error: {e}"})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
         return {"status": "error"}, 500
@@ -716,7 +739,7 @@ async def startup_event():
     await bot_app.initialize()
     logger.info("Bot initialized")
     webhook_url = f"{APP_URL}/webhook"
-    await bot_app.bot.setWebhook(webhook_url)
+    await bot_app.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set: {webhook_url}")
     asyncio.create_task(monitor_transactions(bot_app))
 
@@ -725,6 +748,6 @@ async def shutdown_event():
     await bot_app.shutdown()
     logger.info("Bot shutdown")
 
-if __name__ == "__main":
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=PORT)
