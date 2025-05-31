@@ -3,8 +3,7 @@ import logging
 import requests
 import random
 from fastapi import FastAPI, Request
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler
+from telegram.ext import Update, ApplicationBuilder, CommandHandler
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
