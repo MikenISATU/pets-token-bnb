@@ -3,7 +3,8 @@ import logging
 import requests
 import random
 from fastapi import FastAPI, Request
-from telegram.ext import Update, ApplicationBuilder, CommandHandler
+from telegram import Update
+from telegram.ext import Updater, CommandHandler, Dispatcher
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
@@ -493,7 +494,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
             recent_errors.pop(0)
         return False
 
-async def monitor_transactions(context):
+async def monitor_transactions(updater):
     global last_transaction_hash, is_tracking_enabled
     async with lock:
         if not is_tracking_enabled:
@@ -520,7 +521,7 @@ async def monitor_transactions(context):
                 if last_transaction_hash and tx['transactionHash'] == last_transaction_hash:
                     logger.info(f"Reached last processed transaction {last_transaction_hash}")
                     break
-                if await process_transaction(context, tx, bnb_to_usd_rate, pets_price):
+                if await process_transaction(updater, tx, bnb_to_usd_rate, pets_price):
                     logger.info(f"Processed transaction {tx['transactionHash']}")
                     new_last_hash = tx['transactionHash']
                 else:
@@ -540,51 +541,52 @@ def is_admin(update):
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
 
 # Command handlers
-async def start(update, context):
+def start(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /start for chat {chat_id}")
     active_chats.add(str(chat_id))
-    await context.bot.send_message(
+    context.bot.send_message(
         chat_id,
         "👋 Welcome to PETS Tracker! Use /track to start buy alerts."
     )
 
-async def track(update, context):
+def track(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /track for chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     active_chats.add(str(chat_id))
     global is_tracking_enabled
     is_tracking_enabled = True
-    await context.bot.send_message(chat_id, "🚀 Tracking started")
+    context.bot.send_message(chat_id, "🚀 Tracking started")
     asyncio.create_task(monitor_transactions(context))
 
-async def stop(update, context):
+def stop(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /stop for chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     active_chats.discard(str(chat_id))
     global is_tracking_enabled
     is_tracking_enabled = False
     logger.info("Tracking disabled")
-    await context.bot.send_message(chat_id, "🛑 Tracking stopped")
+    context.bot.send_message(chat_id, "🛑 Tracking stopped")
 
-async def stats(update, context):
+def stats(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /stats for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id, "⏳ Fetching $PETS data")
+    context.bot.send_message(chat_id, "⏳ Fetching $PETS data")
     try:
-        txs = await fetch_bscscan_transactions()
+        loop = asyncio.get_event_loop()
+        txs = loop.run_until_complete(fetch_bscscan_transactions())
         logger.info(f"Fetched {len(txs)} transactions: {txs[:5]}")
         if not txs:
-            await context.bot.send_message(chat_id, "🚫 No recent buys")
+            context.bot.send_message(chat_id, "🚫 No recent buys")
             return
         bnb_to_usd_rate = get_bnb_to_usd()
         pets_price = get_pets_price_from_pancakeswap()
@@ -595,13 +597,13 @@ async def stats(update, context):
                 logger.info(f"Skipping duplicate transaction {tx['transactionHash']}")
                 continue
             logger.info(f"Processing {tx['transactionHash']}")
-            if await process_transaction(context, tx, bnb_to_usd_rate, pets_price, chat_id=chat_id):
+            if loop.run_until_complete(process_transaction(context, tx, bnb_to_usd_rate, pets_price, chat_id=chat_id)):
                 processed.append(tx['transactionHash'])
             seen_hashes.add(tx['transactionHash'])
         if not processed:
-            await context.bot.send_message(chat_id, "🚫 No transactions found meeting criteria")
+            context.bot.send_message(chat_id, "🚫 No transactions found meeting criteria")
         else:
-            await context.bot.send_message(
+            context.bot.send_message(
                 chat_id,
                 f"✅ Processed {len(processed)} buys:\n" + "\n".join(processed)
             )
@@ -610,15 +612,15 @@ async def stats(update, context):
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "🚫 Failed to fetch data")
+        context.bot.send_message(chat_id, "🚫 Failed to fetch data")
 
-async def help_command(update, context):
+def help_command(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /help for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(
+    context.bot.send_message(
         chat_id,
         "🆘 *Commands:*\n\n"
         "/start - Start bot\n"
@@ -633,23 +635,23 @@ async def help_command(update, context):
         parse_mode='Markdown'
     )
 
-async def status(update, context):
+def status(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /status for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(
+    context.bot.send_message(
         chat_id,
         f"🔍 *Status:* {'Enabled' if str(chat_id) in active_chats else 'Disabled'}",
         parse_mode='Markdown'
     )
 
-async def debug(update, context):
+def debug(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /debug for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     status = {
         'trackingEnabled': is_tracking_enabled,
@@ -665,19 +667,19 @@ async def debug(update, context):
             'seleniumAvailable': SELENIUM_AVAILABLE
         }
     }
-    await context.bot.send_message(
+    context.bot.send_message(
         chat_id,
         f"🔍 Debug:\n```json\n{json.dumps(status, indent=2)}\n```",
         parse_mode='Markdown'
     )
 
-async def test(update, context):
+def test(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /test for chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id, "⏳ Generating test buy")
+    context.bot.send_message(chat_id, "⏳ Generating test buy")
     try:
         test_tx_hash = '0xRandomTestTx'
         test_pets_amount = random.randint(1000, 50000)
@@ -708,27 +710,28 @@ async def test(update, context):
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
-        await send_video_with_retry(
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(send_video_with_retry(
             context,
             chat_id,
             video_url,
             {'caption': message, 'parse_mode': 'Markdown'}
-        )
-        await context.bot.send_message(chat_id, "🚖 Success")
+        ))
+        context.bot.send_message(chat_id, "🚖 Success")
     except Exception as e:
         logger.error(f"Test error: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "🚫 Failed")
+        context.bot.send_message(chat_id, "🚫 Failed")
 
-async def no_video(update, context):
+def no_video(update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /noV for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Unauthorized")
+        context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id, "⏳ Testing buy (no video)")
+    context.bot.send_message(chat_id, "⏳ Testing buy (no video)")
     try:
         test_tx_hash = '0xRandomTestNoV'
         test_pets_amount = random.randint(1000, 50000)
@@ -757,14 +760,14 @@ async def no_video(update, context):
             f"[🛍 Merch](https://micropets.store/) "
             f"[💖 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
-        await context.bot.send_message(chat_id, message, parse_mode='Markdown')
-        await context.bot.send_message(chat_id, "🚖 OK")
+        context.bot.send_message(chat_id, message, parse_mode='Markdown')
+        context.bot.send_message(chat_id, "🚖 OK")
     except Exception as e:
         logger.error(f"/noV error: {e}")
         recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 50:
             recent_errors.pop(0)
-        await context.bot.send_message(chat_id, "🚫 Failed")
+        context.bot.send_message(chat_id, "🚫 Failed")
 
 # FastAPI routes
 @app.get("/api/transactions")
@@ -777,7 +780,7 @@ async def webhook(request: Request):
     logger.info("Received webhook")
     try:
         update = Update.de_json(await request.json(), bot_app.bot)
-        await bot_app.process_update(update)
+        bot_app.dispatcher.process_update(update)
         return {"status": "OK"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
@@ -788,10 +791,10 @@ async def webhook(request: Request):
 
 @app.on_event("startup")
 async def startup_event():
-    await bot_app.initialize()
-    logger.info("Bot initialized")
+    bot_app.start()
+    logger.info("Bot started")
     webhook_url = f"{APP_URL}/webhook"
-    await bot_app.bot.set_webhook(webhook_url)
+    bot_app.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set: {webhook_url}")
     asyncio.create_task(monitor_transactions(bot_app))
 
@@ -799,20 +802,21 @@ async def startup_event():
 async def shutdown_event():
     if driver:
         driver.quit()  # Close Selenium driver on shutdown
-    await bot_app.shutdown()
+    bot_app.stop()
     logger.info("Bot shutdown")
 
 # Bot initialization
-bot_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("track", track))
-bot_app.add_handler(CommandHandler("stop", stop))
-bot_app.add_handler(CommandHandler("stats", stats))
-bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(CommandHandler("status", status))
-bot_app.add_handler(CommandHandler("debug", debug))
-bot_app.add_handler(CommandHandler("test", test))
-bot_app.add_handler(CommandHandler("noV", no_video))
+bot_app = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+dispatcher = bot_app.dispatcher
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("track", track))
+dispatcher.add_handler(CommandHandler("stop", stop))
+dispatcher.add_handler(CommandHandler("stats", stats))
+dispatcher.add_handler(CommandHandler("help", help_command))
+dispatcher.add_handler(CommandHandler("status", status))
+dispatcher.add_handler(CommandHandler("debug", debug))
+dispatcher.add_handler(CommandHandler("test", test))
+dispatcher.add_handler(CommandHandler("noV", no_video))
 
 if __name__ == "__main__":
     import uvicorn
