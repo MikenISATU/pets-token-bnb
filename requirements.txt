@@ -8,4 +8,4 @@ web3
 tenacity
 python-dotenv
 beautifulsoup4
-python-telegram-bot>=20.0
+python-telegram-bot==20.8
