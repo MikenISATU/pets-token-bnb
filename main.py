@@ -9,20 +9,9 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from dotenv import load_dotenv
 import asyncio
 from datetime import datetime
-from bs4 import BeautifulSoup
-import re
 from decimal import Decimal
 import json
 import telegram
-try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from webdriver_manager.chrome import ChromeDriverManager
-    SELENIUM_AVAILABLE = True
-except ImportError:
-    SELENIUM_AVAILABLE = False
-    logging.warning("Selenium not available. DexTools scraping will be skipped.")
-import time
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -54,6 +43,7 @@ CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
+COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')  # Optional, add your key if available
 
 # Validate environment variables
 missing_vars = []
@@ -131,24 +121,6 @@ except Exception as e:
         logger.error(f"Failed to initialize Web3 with fallback: {e}")
         raise SystemExit(1)
 
-# Selenium setup for dynamic scraping (if available)
-driver = None
-if SELENIUM_AVAILABLE:
-    try:
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")  # Required for some Linux environments
-        chrome_options.add_argument("--disable-dev-shm-usage")  # Prevent crashes in Docker
-        driver = webdriver.Chrome(
-            options=chrome_options,
-            service=webdriver.chrome.service.Service(ChromeDriverManager().install())
-        )
-        logger.info("Selenium WebDriver initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize Selenium WebDriver: {e}")
-        SELENIUM_AVAILABLE = False
-        driver = None
-
 # Helper functions
 def get_video_url(category):
     public_id = cloudinary_videos.get(category, 'micropets_big_msapxz')
@@ -193,40 +165,50 @@ def get_bnb_to_usd():
         logger.error(f"Error fetching BNB price: {e}")
         return 600  # Fallback price
 
-def get_dextools_data():
-    if not SELENIUM_AVAILABLE or driver is None:
-        logger.warning("Selenium not available, skipping DexTools scraping")
-        return None, None, None
-
-    url = "https://www.dextools.io/app/en/bnb/pair-explorer/0x4bdece4e422fa015336234e4fc4d39ae6dd75b01"
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_pets_price_from_coingecko():
     try:
-        driver.get(url)
-        time.sleep(5)  # Wait for dynamic content to load
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
-
-        # Extract latest buy price and USD value
-        trade_rows = soup.find_all('li', class_='ngcontent-ng-c3746536812')
-        if trade_rows:
-            latest_buy = trade_rows[0]
-            usd_value = float(latest_buy.find('span', class_='ngcontent-ng-c16728904').text.replace('$', '').replace(',', ''))
-            bnb_price = float(latest_buy.find_all('span', class_='ngcontent-ng-c16728904')[1].text)
-            logger.info(f"Scraped latest buy: USD={usd_value:.4f}, BNB={bnb_price:.6f}")
-        else:
-            usd_value, bnb_price = None, None
-            logger.warning("No trade history found on DexTools")
-
-        # Extract market cap
-        market_cap_elem = soup.find('span', class_='ngcontent-ng-c16728904', string=re.compile(r'\d'))
-        market_cap = float(market_cap_elem.text.replace('$', '').replace(',', '')) if market_cap_elem else None
-        if market_cap:
-            logger.info(f"Scraped market cap: ${market_cap:,.0f}")
-        else:
-            logger.warning("Market cap not found on DexTools")
-
-        return usd_value, bnb_price, market_cap
+        # Note: Replace 'micropets' with the correct CoinGecko ID for $PETS if different
+        response = requests.get(
+            'https://api.coingecko.com/api/v3/simple/price?ids=micropets&vs_currencies=usd',
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        price = float(data.get('micropets', {}).get('usd', 0))
+        if price == 0:
+            logger.warning("CoinGecko returned zero price for $PETS")
+            return None
+        logger.info(f"Fetched $PETS price from CoinGecko: ${price:.10f}")
+        return price
     except Exception as e:
-        logger.error(f"Error scraping DexTools: {e}")
-        return None, None, None
+        logger.error(f"Error fetching $PETS price from CoinGecko: {e}")
+        return None
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_pets_price_from_coinmarketcap():
+    if not COINMARKETCAP_API_KEY:
+        logger.warning("CoinMarketCap API key not provided, skipping")
+        return None
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        headers = {
+            'Accepts': 'application/json',
+            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY
+        }
+        params = {
+            'symbol': 'PETS',  # Verify the symbol for $PETS on CoinMarketCap
+            'convert': 'USD'
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        price = float(data['data']['PETS']['quote']['USD']['price'])
+        logger.info(f"Fetched $PETS price from CoinMarketCap: ${price:.10f}")
+        return price
+    except Exception as e:
+        logger.error(f"Error fetching $PETS price from CoinMarketCap: {e}")
+        return None
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_pancakeswap():
@@ -243,12 +225,15 @@ def get_pets_price_from_pancakeswap():
         return pets_price_usd
     except Exception as e:
         logger.error(f"Error fetching $PETS price from PancakeSwap: {e}")
-        # Fallback to DexTools
-        _, bnb_price, _ = get_dextools_data()
-        if bnb_price:
-            bnb_to_usd = get_bnb_to_usd()
-            pets_price_usd = bnb_price * bnb_to_usd
-            logger.info(f"Fallback $PETS price from DexTools: ${pets_price_usd:.10f}")
+        # Fallback to CoinGecko
+        pets_price_usd = get_pets_price_from_coingecko()
+        if pets_price_usd:
+            logger.info(f"Fallback $PETS price from CoinGecko: ${pets_price_usd:.10f}")
+            return pets_price_usd
+        # Fallback to CoinMarketCap
+        pets_price_usd = get_pets_price_from_coinmarketcap()
+        if pets_price_usd:
+            logger.info(f"Fallback $PETS price from CoinMarketCap: ${pets_price_usd:.10f}")
             return pets_price_usd
         return 0.000004011  # Final fallback
 
@@ -267,6 +252,50 @@ def get_token_supply():
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
     return 10000000000  # Fallback
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_market_cap_from_coingecko():
+    try:
+        response = requests.get(
+            'https://api.coingecko.com/api/v3/coins/micropets',  # Verify the ID
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        market_cap = float(data.get('market_data', {}).get('market_cap', {}).get('usd', 0))
+        if market_cap == 0:
+            logger.warning("CoinGecko returned zero market cap for $PETS")
+            return None
+        logger.info(f"Fetched market cap from CoinGecko: ${market_cap:,.0f}")
+        return market_cap
+    except Exception as e:
+        logger.error(f"Error fetching market cap from CoinGecko: {e}")
+        return None
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_market_cap_from_coinmarketcap():
+    if not COINMARKETCAP_API_KEY:
+        logger.warning("CoinMarketCap API key not provided, skipping")
+        return None
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        headers = {
+            'Accepts': 'application/json',
+            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY
+        }
+        params = {
+            'symbol': 'PETS',  # Verify the symbol for $PETS on CoinMarketCap
+            'convert': 'USD'
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        market_cap = float(data['data']['PETS']['quote']['USD']['market_cap'])
+        logger.info(f"Fetched market cap from CoinMarketCap: ${market_cap:,.0f}")
+        return market_cap
+    except Exception as e:
+        logger.error(f"Error fetching market cap from CoinMarketCap: {e}")
+        return None
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap():
@@ -288,26 +317,35 @@ def extract_market_cap():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        # Fallback to DexTools
-        _, _, market_cap = get_dextools_data()
+        # Fallback to CoinGecko
+        market_cap = get_market_cap_from_coingecko()
         if market_cap:
-            cached_market_cap = f'${market_cap:,.0f}'
+            market_cap_int = int(market_cap)
+            cached_market_cap = f'${market_cap_int:,}'
             last_market_cap_cache = datetime.now().timestamp() * 1000
-            logger.info(f"Fallback market cap from DexTools: ${market_cap:,.0f}")
-            return market_cap
-        return 401073  # Fallback
+            logger.info(f"Fallback market cap from CoinGecko: ${market_cap_int:,.0f}")
+            return market_cap_int
+        # Fallback to CoinMarketCap
+        market_cap = get_market_cap_from_coinmarketcap()
+        if market_cap:
+            market_cap_int = int(market_cap)
+            cached_market_cap = f'${market_cap_int:,}'
+            last_market_cap_cache = datetime.now().timestamp() * 1000
+            logger.info(f"Fallback market cap from CoinMarketCap: ${market_cap_int:,.0f}")
+            return market_cap_int
+        return 401073  # Final fallback
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
-    url = f"https://api.bscscan.com/api?module=proxy&action=eth_get_transactionByHash&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}"
+    url = f"https://api.bscscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}"
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         data = response.json()
         if data.get('result'):
-            value_wei = int(data['result']['value'].get('value', '0'), 16)
-            bnb_value = float(w3.from_wei(value_wei), 'ether'))
-            logger.info(f"Transaction {transaction_hash}: {BNB_value:bnb_value:.6f}")
+            value_wei = int(data['result'].get('value', '0'), 16)
+            bnb_value = float(w3.from_wei(value_wei, 'ether'))
+            logger.info(f"Transaction {transaction_hash}: BNB value={bnb_value:.6f}")
             return bnb_value
         logger.error(f"No transaction details for {transaction_hash}")
         return None
@@ -315,49 +353,39 @@ def get_transaction_details(transaction_hash):
         logger.error(f"Error fetching transaction details for {transaction_hash}: {e}")
         return None
 
-def extract_bnb_value(transaction_soup):
-    potential_values = transaction_soup.find_all('span', {'data-bs-toggle': 'tooltip'})
-    for value_span in potential_values:
-        value_text = value_span.text.strip().replace('$', '').replace(',', '')
-        if re.match(r'^\d+(\.\d+)?$', value_text)):
-            try:
-                return float(value_text)
-            except ValueError:
-                continue
-    logger.error("No valid BNB value found in transaction details")
-    return None
-
 def check_execute_function(transaction_hash):
-    transaction_url = f"https://bscscan.com/tx/{transaction_hash}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
+    url = f"https://api.bscscan.com/api?module=transaction&action=gettxreceiptstatus&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}"
     try:
-        response = requests.get(transaction_url, headers=headers, timeout=30)
+        response = requests.get(url, timeout=30)
         response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        bnb_value = extract_bnb_value(soup)
-        execute_badge = soup.find(string=re.compile("Execute", re.IGNORECASE))
-        if not bnb_value:
-            bnb_value = get_transaction_details(transaction_hash)
+        data = response.json()
+        status = data.get('result', {}).get('status', '')
+        bnb_value = get_transaction_details(transaction_hash)
+        # Check for 'Execute' function in transaction input data
+        tx_url = f"https://api.bscscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}"
+        tx_response = requests.get(tx_url, timeout=30)
+        tx_response.raise_for_status()
+        tx_data = tx_response.json()
+        input_data = tx_data.get('result', {}).get('input', '')
+        is_execute = 'execute' in input_data.lower()
         logger.info(
-            f"Transaction {transaction_hash}: Execute={bool(execute_badge)}, "
-            f"BNB={bnb_value}"
+            f"Transaction {transaction_hash}: Execute={is_execute}, "
+            f"BNB={bnb_value}, Status={status}"
         )
-        return bool(execute_badge), bnb_value
+        return is_execute, bnb_value
     except Exception as e:
         logger.error(f"Error checking transaction {transaction_hash}: {e}")
         bnb_value = get_transaction_details(transaction_hash)
         return False, bnb_value
 
 def get_balance_before_transaction(wallet_address, block_number):
-    url = f"https://api.bscscan.com/api?module=account&action=tokenbalancehistory&contractaddress={CONTRACT_ADDRESS}&address={wallet_address}&blockno={block_number}&apikey={BSC_API_KEY}"
+    url = f"https://api.bscscan.com/api?module=account&action=tokenbalancehistory&contractaddress={CONTRACT_ADDRESS}&address={wallet_address}&blockno={block_number}&apikey={BSCSCAN_API_KEY}"
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
         data = response.json()
         if data['status'] == '1':
-            balance = Decimal(data['result']['data']).amount / Decimal(1e18)
+            balance = Decimal(data['result']) / Decimal(1e18)
             logger.info(f"Balance for {shorten_address(wallet_address)} at block {block_number}: {balance:,.0f} tokens")
             return balance
         logger.error(f"API Error: {data['message']}")
@@ -407,9 +435,9 @@ async def fetch_bscscan_transactions():
         raise ValueError(f"Invalid BscScan response: {data['message']}")
     except Exception as e:
         if isinstance(e, requests.HTTPError) and e.response.status_code == 429:
-            logger.error("BscScan rate limit hit, using cached transactions")
-            return transaction_cache
-        logger.error(f"Error fetching transactions: {e}")
+            logger.warning("BscScan rate limit hit, using cached transactions")
+            return transaction_cache or []
+        logger.error(f"Error fetching BscScan transactions: {e}")
         return transaction_cache or []
 
 async def send_video_with_retry(context, chat_id, video_url, options, max_retries=5, delay=2):
@@ -446,7 +474,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}, "
         f"BNB={bnb_value:.6f} (${(bnb_value * bnb_to_usd_rate):,.2f})"
     )
-    if usd_value < 50:  # Increased threshold to $50
+    if usd_value < 50:  # Threshold at $50
         logger.info(f"Transaction {transaction['transactionHash']} below threshold $50")
         return False
 
@@ -517,7 +545,7 @@ async def monitor_transactions(context):
                 return
             bnb_to_usd_rate = get_bnb_to_usd()
             pets_price = get_pets_price_from_pancakeswap()
-            logger.info(f"BNB price: ${bnb_to_usd_rate:.2f}, PETS price={pets_price:.10f}")
+            logger.info(f"BNB price: ${bnb_to_usd_rate:.2f}, PETS price: ${pets_price:.10f}")
             new_last_hash = last_transaction_hash
             for tx in reversed(txs):
                 logger.info(f"Checking transaction {tx['transactionHash']}")
@@ -560,7 +588,7 @@ async def track(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /track for chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     active_chats.add(str(chat_id))
     global is_tracking_enabled
@@ -572,19 +600,19 @@ async def stop(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /stop for chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     active_chats.discard(str(chat_id))
     global is_tracking_enabled
     is_tracking_enabled = False
     logger.info("Tracking disabled")
-    await context.bot.send_message(chat_id, "🛑 Stopped tracking")
+    await context.bot.send_message(chat_id, "🛑 Tracking stopped")
 
 async def stats(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /stats for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id, "⏳ Fetching $PETS data")
     try:
@@ -623,7 +651,7 @@ async def help_command(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /help for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id=chat_id,
@@ -646,7 +674,7 @@ async def status(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /status for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id,
@@ -658,7 +686,7 @@ async def debug(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /debug for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     status = {
         'trackingEnabled': is_tracking_enabled,
@@ -670,8 +698,7 @@ async def debug(update: Update, context):
             'lastTransactionFetch': (
                 datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat()
                 if last_transaction_fetch else None
-            ),
-            'seleniumAvailable': SELENIUM_AVAILABLE
+            )
         }
     }
     await context.bot.send_message(
@@ -684,7 +711,7 @@ async def test(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /test for chat {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id, "⏳ Generating test buy")
     try:
@@ -735,7 +762,7 @@ async def no_video(update: Update, context):
     chat_id = update.effective_chat.id
     logger.info(f"Processing /noV for {chat_id}")
     if not is_admin(update):
-        await context.bot.send_message(chat_id, "🚫 Not reachable")
+        await context.bot.send_message(chat_id, "🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id, "⏳ Testing buy (no video)")
     try:
@@ -806,8 +833,6 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    if driver:
-        driver.quit()  # Close Selenium driver on shutdown
     await bot_app.shutdown()
     logger.info("Bot shutdown")
 
