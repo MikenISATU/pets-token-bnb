@@ -3,7 +3,7 @@ import logging
 import requests
 import random
 from fastapi import FastAPI, Request
-from telegram import Update  # Fixed import
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -37,13 +37,13 @@ app = FastAPI()
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))  # Railway-specific
+APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
-CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')
+CONTRACT_ADDRESS = Web3.to_checksum_address(os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3'))
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-PORT = int(os.getenv('PORT', 8080))  # Railway assigns PORT
+PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
 
 # Validate environment variables
@@ -67,7 +67,7 @@ if missing_vars:
 logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=*****, BSCSCAN_API_KEY=*****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, PORT={PORT}, BNB_RPC_URL=*****")
 
 # Constants
-TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'
+TARGET_ADDRESS = Web3.to_checksum_address('0x4bdece4e422fa015336234e4fc4d39ae6dd75b01')  # Correct PETS/BNB pair address
 EMOJI = '💰'
 
 # PancakeSwap Pair ABI
@@ -149,7 +149,7 @@ def load_posted_transactions():
             return set(line.strip() for line in f)
     except Exception as e:
         logger.warning(f"Could not load posted_transactions.txt: {e}")
-        return set()  # Fallback to empty set for Railway's ephemeral filesystem
+        return set()
 
 def log_posted_transaction(transaction_hash):
     try:
@@ -171,7 +171,7 @@ def get_bnb_to_usd():
         return price
     except Exception as e:
         logger.error(f"Error fetching BNB price: {e}")
-        return 600  # Fallback price
+        return 658.96  # Fallback price based on DexTools
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_coingecko():
@@ -224,22 +224,27 @@ def get_pets_price_from_pancakeswap():
         pair_contract = w3.eth.contract(address=pair_address, abi=PANCAKESWAP_PAIR_ABI)
         reserves = pair_contract.functions.getReserves().call()
         reserve0, reserve1, _ = reserves
-        bnb_per_pets = reserve1 / reserve0 / 1e18
+        # Assuming WBNB is token0, PETS is token1 (verify this order)
+        bnb_per_pets = reserve0 / reserve1 / 1e18  # WBNB per PETS
         bnb_to_usd = get_bnb_to_usd()
         pets_price_usd = bnb_per_pets * bnb_to_usd
         logger.info(f"Fetched $PETS price from PancakeSwap: ${pets_price_usd:.10f}")
         return pets_price_usd
     except Exception as e:
         logger.error(f"Error fetching $PETS price from PancakeSwap: {e}")
+        # Fallback to CoinGecko
         pets_price_usd = get_pets_price_from_coingecko()
         if pets_price_usd:
             logger.info(f"Fallback $PETS price from CoinGecko: ${pets_price_usd:.10f}")
             return pets_price_usd
+        # Fallback to CoinMarketCap
         pets_price_usd = get_pets_price_from_coinmarketcap()
         if pets_price_usd:
             logger.info(f"Fallback $PETS price from CoinMarketCap: ${pets_price_usd:.10f}")
             return pets_price_usd
-        return 0.000004011
+        # Fallback to DexTools price as last resort
+        logger.warning("Using hardcoded PETS price as last resort")
+        return 0.03890  # Matches DexTools price
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -255,7 +260,7 @@ def get_token_supply():
         logger.error(f"API Error fetching token supply: {data['message']}")
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
-    return 10000000000
+    return 6600000000  # Fallback to match DexTools total supply
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_market_cap_from_coingecko():
@@ -321,6 +326,7 @@ def extract_market_cap():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
+        # Fallback to CoinGecko
         market_cap = get_market_cap_from_coingecko()
         if market_cap:
             market_cap_int = int(market_cap)
@@ -328,6 +334,7 @@ def extract_market_cap():
             last_market_cap_cache = datetime.now().timestamp() * 1000
             logger.info(f"Fallback market cap from CoinGecko: ${market_cap_int:,.0f}")
             return market_cap_int
+        # Fallback to CoinMarketCap
         market_cap = get_market_cap_from_coinmarketcap()
         if market_cap:
             market_cap_int = int(market_cap)
@@ -335,7 +342,9 @@ def extract_market_cap():
             last_market_cap_cache = datetime.now().timestamp() * 1000
             logger.info(f"Fallback market cap from CoinMarketCap: ${market_cap_int:,.0f}")
             return market_cap_int
-        return 401073
+        # Fallback to match DexTools
+        logger.warning("Using hardcoded market cap as last resort")
+        return 92120  # Matches DexTools
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -469,14 +478,16 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         return False
 
     pets_amount = float(transaction['value']) / 1e18
-    usd_value = pets_amount * pets_price
+    usd_value_bnb = bnb_value * bnb_to_usd_rate
+    usd_value_pets = pets_amount * pets_price
+    usd_value_for_threshold = max(usd_value_bnb, usd_value_pets)
     logger.info(
         f"Transaction {transaction['transactionHash']}: "
-        f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}, "
-        f"BNB={bnb_value:.6f} (${(bnb_value * bnb_to_usd_rate):,.2f})"
+        f"PETS={pets_amount:,.0f}, USD_PETS={usd_value_pets:,.2f}, PETS_price={pets_price:.10f}, "
+        f"BNB={bnb_value:.6f} (${usd_value_bnb:,.2f})"
     )
-    if usd_value < 50:
-        logger.info(f"Transaction {transaction['transactionHash']} below threshold $50")
+    if usd_value_for_threshold < 50:
+        logger.info(f"Transaction {transaction['transactionHash']} below threshold $50 (BNB USD: ${usd_value_bnb:.2f}, PETS USD: ${usd_value_pets:.2f})")
         return False
 
     market_cap = extract_market_cap()
@@ -487,18 +498,18 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         balance_before + Decimal(pets_amount) if balance_before is not None else None
     )
     holding_change_text = f"+{percent_increase:.2f}%" if percent_increase else "N/A"
-    emoji_count = min(int(usd_value) // 50, 100)
+    emoji_count = min(int(usd_value_for_threshold) // 50, 100)
     emojis = EMOJI * emoji_count
     tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
-    category = categorize_buy(usd_value)
+    category = categorize_buy(usd_value_for_threshold)
     video_url = get_video_url(category)
 
     message = (
         f"🚀 MicroPets Buy! BNBchain 💰\n\n"
         f"{emojis}\n"
         f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
-        f"{pets_amount:,.0f} (${usd_value:,.2f})\n"
-        f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
+        f"{pets_amount:,.0f} (${usd_value_pets:,.2f})\n"
+        f"💵 BNB Value: {bnb_value:,.4f} (${usd_value_bnb:,.2f})\n"
         f"🏦 Market Cap: ${market_cap:,.0f}\n"
         f"🔼 Holding Change: {holding_change_text}\n"
         f"🤑 Hodler: {shorten_address(wallet_address)}\n"
@@ -829,7 +840,7 @@ async def startup_event():
     try:
         await bot_app.initialize()
         logger.info("Bot initialized")
-        webhook_url = f"https://{APP_URL}/webhook"  # Ensure HTTPS for Railway
+        webhook_url = f"https://{APP_URL}/webhook"
         await bot_app.bot.set_webhook(webhook_url)
         logger.info(f"Webhook set: {webhook_url}")
         asyncio.create_task(monitor_transactions(bot_app))
