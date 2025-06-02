@@ -45,7 +45,7 @@ ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
-TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x4BdEcE4E422fA015336234e4fC4D39ae6dD75b01')  # Default to $PETS/BNB pair
+TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x4BdEcE4E422fA015336234e4fC4D39ae6dD75b01')
 
 # Validate environment variables
 missing_vars = []
@@ -104,6 +104,7 @@ is_tracking_enabled = False
 recent_errors = []
 last_transaction_fetch = 0
 TRANSACTION_CACHE_THRESHOLD = 2 * 60 * 1000  # 2 minutes
+posted_transactions = set()
 
 # Initialize Web3
 try:
@@ -220,7 +221,6 @@ def get_pets_price_from_pancakeswap():
         pair_contract = w3.eth.contract(address=pair_address, abi=PANCAKESWAP_PAIR_ABI)
         reserves = pair_contract.functions.getReserves().call()
         reserve0, reserve1, _ = reserves
-        # Adjust based on token pair orientation (PETS/WBNB or WBNB/PETS)
         bnb_per_pets = reserve1 / reserve0 / 1e18 if reserve0 > 0 else 0
         bnb_to_usd = get_bnb_to_usd()
         pets_price_usd = bnb_per_pets * bnb_to_usd
@@ -230,7 +230,7 @@ def get_pets_price_from_pancakeswap():
         return pets_price_usd
     except Exception as e:
         logger.error(f"Error fetching $PETS price from PancakeSwap: {e}")
-        return get_pets_price_from_coingecko() or get_pets_price_from_coinmarketcap() or 0.00003886  # Fallback to approximate price
+        return get_pets_price_from_coingecko() or get_pets_price_from_coinmarketcap() or 0.00003886
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -246,7 +246,7 @@ def get_token_supply():
         logger.error(f"API Error fetching token supply: {data['message']}")
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
-    return 6_604_885_020  # Fallback to known supply from logs
+    return 6_604_885_020
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap():
@@ -262,7 +262,7 @@ def extract_market_cap():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        return 256600  # Fallback to $256.6K as a temporary measure
+        return 256600
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -402,7 +402,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}, "
         f"BNB={bnb_value:.6f} (${(bnb_value * bnb_to_usd_rate):,.2f})"
     )
-    if usd_value < 1:  # Changed to $1 threshold
+    if usd_value < 1:
         logger.info(f"Transaction {transaction['transactionHash']} below threshold $1")
         return False
 
@@ -414,7 +414,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         balance_before + Decimal(pets_amount) if balance_before is not None else None
     )
     holding_change_text = f"+{percent_increase:.2f}%" if percent_increase else "N/A"
-    emoji_count = min(int(usd_value) // 1, 100)  # Adjusted for $1 threshold
+    emoji_count = min(int(usd_value) // 1, 100)
     emojis = EMOJI * emoji_count
     tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
     category = categorize_buy(usd_value)
@@ -645,9 +645,9 @@ async def test(update: Update, context):
     try:
         test_tx_hash = '0xRandomTestTx'
         test_pets_amount = random.randint(1000, 50000)
-        usd_value = random.uniform(1, 500)  # Adjusted to start at $1
+        usd_value = random.uniform(1, 500)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / bnb_to_usd_rate  # More realistic BNB value
+        bnb_value = usd_value / bnb_to_usd_rate
         pets_price = get_pets_price_from_pancakeswap()
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
@@ -696,7 +696,7 @@ async def no_video(update: Update, context):
     try:
         test_tx_hash = '0xRandomTestNoV'
         test_pets_amount = random.randint(1000, 50000)
-        usd_value = random.uniform(1, 5000)  # Adjusted to start at $1
+        usd_value = random.uniform(1, 5000)
         bnb_to_usd_rate = get_bnb_to_usd()
         bnb_value = usd_value / bnb_to_usd_rate
         pets_price = get_pets_price_from_pancakeswap()
@@ -734,6 +734,11 @@ async def no_video(update: Update, context):
 @app.get("/")
 async def health_check():
     return {"status": "Bot is running"}
+
+@app.get("/webhook")
+async def webhook_get():
+    logger.info("Received GET request to /webhook")
+    return {"status": "This endpoint only accepts POST requests for Telegram webhooks. Use GET / for health checks."}
 
 @app.get("/api/transactions")
 async def get_transactions():
