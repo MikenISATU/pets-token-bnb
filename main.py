@@ -1,9 +1,3 @@
-this image is in dextools and what can we do to get this correct and so the marketcap:
-
-
-Andfo r pancakeswap link: https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3
-
-codes:
 import os
 import logging
 import requests
