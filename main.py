@@ -1,9 +1,15 @@
+this image is in dextools and what can we do to get this correct and so the marketcap:
+
+
+Andfo r pancakeswap link: https://pancakeswap.finance/swap?outputCurrency=0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3
+
+codes:
 import os
 import logging
 import requests
 import random
 from fastapi import FastAPI, Request
-from telegram import Update
+from telegram import Update  # Fixed import
 from telegram.ext import ApplicationBuilder, CommandHandler
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -39,13 +45,12 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))  # Railway-specific
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
-BNB_RPC_URL = os.getenv('BNB_RPC_URL', 'https://bsc-dataseed.binance.org/')
-CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3').lower()
+BNB_RPC_URL = os.getenv('BNB_RPC_URL')
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))  # Railway assigns PORT
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
-POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 60))
 
 # Validate environment variables
 missing_vars = []
@@ -68,7 +73,7 @@ if missing_vars:
 logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=*****, BSCSCAN_API_KEY=*****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, PORT={PORT}, BNB_RPC_URL=*****")
 
 # Constants
-TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'.lower()
+TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'
 EMOJI = '💰'
 
 # PancakeSwap Pair ABI
@@ -150,7 +155,7 @@ def load_posted_transactions():
             return set(line.strip() for line in f)
     except Exception as e:
         logger.warning(f"Could not load posted_transactions.txt: {e}")
-        return set()
+        return set()  # Fallback to empty set for Railway's ephemeral filesystem
 
 def log_posted_transaction(transaction_hash):
     try:
@@ -172,7 +177,7 @@ def get_bnb_to_usd():
         return price
     except Exception as e:
         logger.error(f"Error fetching BNB price: {e}")
-        return 658.96  # Updated fallback price for June 2025
+        return 600  # Fallback price
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_coingecko():
@@ -225,12 +230,9 @@ def get_pets_price_from_pancakeswap():
         pair_contract = w3.eth.contract(address=pair_address, abi=PANCAKESWAP_PAIR_ABI)
         reserves = pair_contract.functions.getReserves().call()
         reserve0, reserve1, _ = reserves
-        # WBNB is token0, PETS is token1
-        bnb_per_pets = reserve0 / reserve1 / 1e18  # Corrected ratio
+        bnb_per_pets = reserve1 / reserve0 / 1e18
         bnb_to_usd = get_bnb_to_usd()
         pets_price_usd = bnb_per_pets * bnb_to_usd
-        if pets_price_usd <= 0:
-            raise ValueError("Invalid PETS price from PancakeSwap")
         logger.info(f"Fetched $PETS price from PancakeSwap: ${pets_price_usd:.10f}")
         return pets_price_usd
     except Exception as e:
@@ -243,7 +245,7 @@ def get_pets_price_from_pancakeswap():
         if pets_price_usd:
             logger.info(f"Fallback $PETS price from CoinMarketCap: ${pets_price_usd:.10f}")
             return pets_price_usd
-        return 0.00001395  # Matches DexTools approximation
+        return 0.000004011
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -259,7 +261,51 @@ def get_token_supply():
         logger.error(f"API Error fetching token supply: {data['message']}")
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
-    return 6600000000  # Updated to match DexTools total supply
+    return 10000000000
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_market_cap_from_coingecko():
+    try:
+        response = requests.get(
+            'https://api.coingecko.com/api/v3/coins/micropets',
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        market_cap = float(data.get('market_data', {}).get('market_cap', {}).get('usd', 0))
+        if market_cap == 0:
+            logger.warning("CoinGecko returned zero market cap for $PETS")
+            return None
+        logger.info(f"Fetched market cap from CoinGecko: ${market_cap:,.0f}")
+        return market_cap
+    except Exception as e:
+        logger.error(f"Error fetching market cap from CoinGecko: {e}")
+        return None
+
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
+def get_market_cap_from_coinmarketcap():
+    if not COINMARKETCAP_API_KEY:
+        logger.warning("CoinMarketCap API key not provided, skipping")
+        return None
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        headers = {
+            'Accepts': 'application/json',
+            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY
+        }
+        params = {
+            'symbol': 'PETS',
+            'convert': 'USD'
+        }
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        market_cap = float(data['data']['PETS']['quote']['USD']['market_cap'])
+        logger.info(f"Fetched market cap from CoinMarketCap: ${market_cap:,.0f}")
+        return market_cap
+    except Exception as e:
+        logger.error(f"Error fetching market cap from CoinMarketCap: {e}")
+        return None
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap():
@@ -295,7 +341,7 @@ def extract_market_cap():
             last_market_cap_cache = datetime.now().timestamp() * 1000
             logger.info(f"Fallback market cap from CoinMarketCap: ${market_cap_int:,.0f}")
             return market_cap_int
-        return 92120  # Fallback to match DexTools (~$92.12K)
+        return 401073
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -529,8 +575,8 @@ async def monitor_transactions(context):
             recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
             if len(recent_errors) > 5:
                 recent_errors.pop(0)
-        logger.info(f"Sleeping for {POLL_INTERVAL} seconds")
-        await asyncio.sleep(POLL_INTERVAL)
+        logger.info(f"Sleeping for {int(os.getenv('POLL_INTERVAL', 60))} seconds")
+        await asyncio.sleep(int(os.getenv('POLL_INTERVAL', 60)))
 
 def is_admin(update):
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
@@ -680,7 +726,7 @@ async def test(update: Update, context):
         test_pets_amount = random.randint(1000, 50000)
         usd_value = random.uniform(50, 500)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / bnb_to_usd_rate
+        bnb_value = usd_value / 1000
         pets_price = get_pets_price_from_pancakeswap()
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
@@ -697,13 +743,13 @@ async def test(update: Update, context):
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding Change: {holding_change_text}\n"
-            f"🤑 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍 View on BscScan]({tx_url})\n\n"
-            f"💰 [Staking](https://pets.micropets.io/petdex) "
-            f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
-            f"🛍 [Merch](https://micropets.store/) "
-            f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"🔼 Holding: {holding_change_text}\n"
+            f"🦲 Hodler: {shorten_address(wallet_address)}\n"
+            f"[🔍]({tx_url})\n\n"
+            f"[💰 Staking](https://pets.micropets.io/) "
+            f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
+            f"[🛍 Merch](https://micropets.store/) "
+            f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await send_video_with_retry(
             context,
@@ -731,7 +777,7 @@ async def no_video(update: Update, context):
         test_pets_amount = random.randint(1000, 50000)
         usd_value = random.uniform(50, 5000)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / bnb_to_usd_rate
+        bnb_value = usd_value / 1000
         pets_price = get_pets_price_from_pancakeswap()
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
         emoji_count = min(int(usd_value) // 50, 100)
@@ -746,13 +792,13 @@ async def no_video(update: Update, context):
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding Change: {holding_change_text}\n"
-            f"🤑 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍 View on BscScan]({tx_url})\n\n"
-            f"💰 [Staking](https://pets.micropets.io/petdex) "
-            f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
-            f"🛍 [Merch](https://micropets.store/) "
-            f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"🔼 Holding: {holding_change_text}\n"
+            f"🦀 Hodler: {shorten_address(wallet_address)}\n"
+            f"[🔍]({tx_url})\n\n"
+            f"[💰 Staking](https://pets.micropets.io/) "
+            f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
+            f"[🛍 Merch](https://micropets.store/) "
+            f"[💖 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await context.bot.send_message(chat_id, message, parse_mode='Markdown')
         await context.bot.send_message(chat_id, "🚖 OK")
