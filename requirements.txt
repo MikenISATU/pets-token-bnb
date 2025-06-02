@@ -1,4 +1,7 @@
-
+python-telegram-bot==20.8
+fastapi
 uvicorn
-python-telegram-bot==20.7
-requests==2.31.0
+requests
+web3
+tenacity
+python-dotenv
