@@ -15,10 +15,10 @@ import json
 import telegram
 
 # Logging setup
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Suppress HTTPX and Telegram logs
+# Suppress excessive logs
 httpx_logger = logging.getLogger("httpx")
 httpx_logger.setLevel(logging.WARNING)
 telegram_logger = logging.getLogger("telegram")
@@ -39,32 +39,28 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
-BNB_RPC_URL = os.getenv('BNB_RPC_URL')
+BNB_RPC_URL = os.getenv('BNB_RPC_URL', 'https://bsc-dataseed.binance.org/')  # Default fallback
 CONTRACT_ADDRESS = Web3.to_checksum_address(os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3'))
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
+POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 60))
 
 # Validate environment variables
-missing_vars = []
-for var, name in [
-    (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
-    (CLOUDINARY_CLOUD_NAME, 'CLOUDINARY_CLOUD_NAME'),
-    (APP_URL, 'APP_URL/RAILWAY_PUBLIC_DOMAIN'),
-    (BSCSCAN_API_KEY, 'BSCSCAN_API_KEY'),
-    (BNB_RPC_URL, 'BNB_RPC_URL'),
-    (CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'),
-    (ADMIN_CHAT_ID, 'ADMIN_USER_ID'),
-    (TELEGRAM_CHAT_ID, 'TELEGRAM_CHAT_ID')
-]:
-    if not var:
-        missing_vars.append(name)
+required_vars = {
+    'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
+    'APP_URL': APP_URL,
+    'BSCSCAN_API_KEY': BSCSCAN_API_KEY,
+    'CONTRACT_ADDRESS': CONTRACT_ADDRESS,
+    'ADMIN_USER_ID': ADMIN_CHAT_ID,
+    'TELEGRAM_CHAT_ID': TELEGRAM_CHAT_ID
+}
+missing_vars = [name for name, value in required_vars.items() if not value]
 if missing_vars:
     logger.error(f"Missing critical environment variables: {', '.join(missing_vars)}")
     raise SystemExit(1)
-
-logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=*****, BSCSCAN_API_KEY=*****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, PORT={PORT}, BNB_RPC_URL=*****")
+logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=*****, BSCSCAN_API_KEY=*****, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, PORT={PORT}")
 
 # Constants
 TARGET_ADDRESS = Web3.to_checksum_address('0x4bdece4e422fa015336234e4fc4d39ae6dd75b01')  # Correct PETS/BNB pair address
@@ -109,14 +105,18 @@ MARKET_CAP_CACHE_DURATION = 5 * 60 * 1000  # 5 minutes
 posted_transactions = set()
 lock = asyncio.Lock()
 
-# Initialize Web3
+# Initialize Web3 with fallback
 try:
     w3 = Web3(Web3.HTTPProvider(BNB_RPC_URL, request_kwargs={'timeout': 60}))
+    if not w3.is_connected():
+        raise ValueError("Web3 not connected to primary RPC")
     logger.info("Web3 initialized with BNB_RPC_URL")
 except Exception as e:
-    logger.error(f"Failed to initialize Web3 with BNB_RPC_URL: {e}")
+    logger.warning(f"Failed to initialize Web3 with {BNB_RPC_URL}: {e}")
     try:
         w3 = Web3(Web3.HTTPProvider('https://bsc-dataseed2.binance.org', request_kwargs={'timeout': 60}))
+        if not w3.is_connected():
+            raise ValueError("Web3 not connected to fallback RPC")
         logger.info("Web3 initialized with fallback bsc-dataseed2")
     except Exception as e:
         logger.error(f"Failed to initialize Web3 with fallback: {e}")
@@ -137,16 +137,14 @@ def categorize_buy(usd_value):
     return 'Extra Large Buy'
 
 def shorten_address(address):
-    if not address:
-        return ''
-    return f"{address[:6]}...{address[-4:]}"
+    return f"{address[:6]}...{address[-4:]}" if address else ''
 
 def load_posted_transactions():
     try:
-        if not os.path.exists('posted_transactions.txt'):
-            return set()
-        with open('posted_transactions.txt', 'r') as f:
-            return set(line.strip() for line in f)
+        if os.path.exists('posted_transactions.txt'):
+            with open('posted_transactions.txt', 'r') as f:
+                return set(line.strip() for line in f)
+        return set()
     except Exception as e:
         logger.warning(f"Could not load posted_transactions.txt: {e}")
         return set()
@@ -171,7 +169,7 @@ def get_bnb_to_usd():
         return price
     except Exception as e:
         logger.error(f"Error fetching BNB price: {e}")
-        return 658.96  # Fallback price based on DexTools
+        return 658.96  # Fallback price based on recent DexTools data
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_coingecko():
@@ -199,14 +197,8 @@ def get_pets_price_from_coinmarketcap():
         return None
     try:
         url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-        headers = {
-            'Accepts': 'application/json',
-            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY
-        }
-        params = {
-            'symbol': 'PETS',
-            'convert': 'USD'
-        }
+        headers = {'Accepts': 'application/json', 'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY}
+        params = {'symbol': 'PETS', 'convert': 'USD'}
         response = requests.get(url, headers=headers, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
@@ -220,29 +212,27 @@ def get_pets_price_from_coinmarketcap():
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_pancakeswap():
     try:
-        pair_address = TARGET_ADDRESS
-        pair_contract = w3.eth.contract(address=pair_address, abi=PANCAKESWAP_PAIR_ABI)
+        pair_contract = w3.eth.contract(address=TARGET_ADDRESS, abi=PANCAKESWAP_PAIR_ABI)
         reserves = pair_contract.functions.getReserves().call()
         reserve0, reserve1, _ = reserves
-        # Assuming WBNB is token0, PETS is token1 (verify this order)
+        # Assuming WBNB is token0, PETS is token1
         bnb_per_pets = reserve0 / reserve1 / 1e18  # WBNB per PETS
         bnb_to_usd = get_bnb_to_usd()
         pets_price_usd = bnb_per_pets * bnb_to_usd
+        if pets_price_usd <= 0:
+            raise ValueError("Invalid PETS price from PancakeSwap")
         logger.info(f"Fetched $PETS price from PancakeSwap: ${pets_price_usd:.10f}")
         return pets_price_usd
     except Exception as e:
         logger.error(f"Error fetching $PETS price from PancakeSwap: {e}")
-        # Fallback to CoinGecko
         pets_price_usd = get_pets_price_from_coingecko()
         if pets_price_usd:
             logger.info(f"Fallback $PETS price from CoinGecko: ${pets_price_usd:.10f}")
             return pets_price_usd
-        # Fallback to CoinMarketCap
         pets_price_usd = get_pets_price_from_coinmarketcap()
         if pets_price_usd:
             logger.info(f"Fallback $PETS price from CoinMarketCap: ${pets_price_usd:.10f}")
             return pets_price_usd
-        # Fallback to DexTools price as last resort
         logger.warning("Using hardcoded PETS price as last resort")
         return 0.03890  # Matches DexTools price
 
@@ -261,50 +251,6 @@ def get_token_supply():
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
     return 6600000000  # Fallback to match DexTools total supply
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def get_market_cap_from_coingecko():
-    try:
-        response = requests.get(
-            'https://api.coingecko.com/api/v3/coins/micropets',
-            timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-        market_cap = float(data.get('market_data', {}).get('market_cap', {}).get('usd', 0))
-        if market_cap == 0:
-            logger.warning("CoinGecko returned zero market cap for $PETS")
-            return None
-        logger.info(f"Fetched market cap from CoinGecko: ${market_cap:,.0f}")
-        return market_cap
-    except Exception as e:
-        logger.error(f"Error fetching market cap from CoinGecko: {e}")
-        return None
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def get_market_cap_from_coinmarketcap():
-    if not COINMARKETCAP_API_KEY:
-        logger.warning("CoinMarketCap API key not provided, skipping")
-        return None
-    try:
-        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-        headers = {
-            'Accepts': 'application/json',
-            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY
-        }
-        params = {
-            'symbol': 'PETS',
-            'convert': 'USD'
-        }
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        market_cap = float(data['data']['PETS']['quote']['USD']['market_cap'])
-        logger.info(f"Fetched market cap from CoinMarketCap: ${market_cap:,.0f}")
-        return market_cap
-    except Exception as e:
-        logger.error(f"Error fetching market cap from CoinMarketCap: {e}")
-        return None
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap():
@@ -326,25 +272,7 @@ def extract_market_cap():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        # Fallback to CoinGecko
-        market_cap = get_market_cap_from_coingecko()
-        if market_cap:
-            market_cap_int = int(market_cap)
-            cached_market_cap = f'${market_cap_int:,}'
-            last_market_cap_cache = datetime.now().timestamp() * 1000
-            logger.info(f"Fallback market cap from CoinGecko: ${market_cap_int:,.0f}")
-            return market_cap_int
-        # Fallback to CoinMarketCap
-        market_cap = get_market_cap_from_coinmarketcap()
-        if market_cap:
-            market_cap_int = int(market_cap)
-            cached_market_cap = f'${market_cap_int:,}'
-            last_market_cap_cache = datetime.now().timestamp() * 1000
-            logger.info(f"Fallback market cap from CoinMarketCap: ${market_cap_int:,.0f}")
-            return market_cap_int
-        # Fallback to match DexTools
-        logger.warning("Using hardcoded market cap as last resort")
-        return 92120  # Matches DexTools
+        return 92120  # Fallback to match DexTools market cap
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -461,10 +389,11 @@ async def send_video_with_retry(context, chat_id, video_url, options, max_retrie
             if i == max_retries - 1:
                 await context.bot.send_message(
                     chat_id,
-                    f"{options['caption']}\n\n⚠️ Video unavailable.",
+                    f"{options.get('caption', '')}\n\n⚠️ Video unavailable.",
                     parse_mode='Markdown'
                 )
                 logger.info(f"Sent fallback text to chat {chat_id}")
+            await asyncio.sleep(delay)
 
 async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price, chat_id=TELEGRAM_CHAT_ID):
     global posted_transactions
@@ -580,8 +509,8 @@ async def monitor_transactions(context):
             recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
             if len(recent_errors) > 5:
                 recent_errors.pop(0)
-        logger.info(f"Sleeping for {int(os.getenv('POLL_INTERVAL', 60))} seconds")
-        await asyncio.sleep(int(os.getenv('POLL_INTERVAL', 60)))
+        logger.info(f"Sleeping for {POLL_INTERVAL} seconds")
+        await asyncio.sleep(POLL_INTERVAL)
 
 def is_admin(update):
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
@@ -589,11 +518,11 @@ def is_admin(update):
 # Command handlers
 async def start(update: Update, context):
     chat_id = update.effective_chat.id
-    logger.info(f"Processing /start for chat {chat_id}")
+    logger.info(f"Received /start from chat {chat_id}")
     active_chats.add(str(chat_id))
     await context.bot.send_message(
         chat_id=chat_id,
-        text="👋 Welcome to PETS Tracker! Use /track to start buy alerts."
+        text="👋 Welcome to PETS Tracker! Use /help for commands."
     )
 
 async def track(update: Update, context):
@@ -706,7 +635,7 @@ async def debug(update: Update, context):
         'lastTxHash': last_transaction_hash,
         'recentErrors': recent_errors[-5:],
         'apiStatus': {
-            'bscWeb3': bool(w3),
+            'bscWeb3': bool(w3.is_connected()),
             'lastTransactionFetch': (
                 datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat()
                 if last_transaction_fetch else None
@@ -731,7 +660,7 @@ async def test(update: Update, context):
         test_pets_amount = random.randint(1000, 50000)
         usd_value = random.uniform(50, 500)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / 1000
+        bnb_value = usd_value / bnb_to_usd_rate
         pets_price = get_pets_price_from_pancakeswap()
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
@@ -748,13 +677,13 @@ async def test(update: Update, context):
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦲 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n\n"
-            f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
-            f"[🛍 Merch](https://micropets.store/) "
-            f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"🔼 Holding Change: {holding_change_text}\n"
+            f"🤑 Hodler: {shorten_address(wallet_address)}\n"
+            f"[🔍 View on BscScan]({tx_url})\n\n"
+            f"💰 [Staking](https://pets.micropets.io/petdex) "
+            f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
+            f"🛍 [Merch](https://micropets.store/) "
+            f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await send_video_with_retry(
             context,
@@ -782,7 +711,7 @@ async def no_video(update: Update, context):
         test_pets_amount = random.randint(1000, 50000)
         usd_value = random.uniform(50, 5000)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / 1000
+        bnb_value = usd_value / bnb_to_usd_rate
         pets_price = get_pets_price_from_pancakeswap()
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
         emoji_count = min(int(usd_value) // 50, 100)
@@ -797,13 +726,13 @@ async def no_video(update: Update, context):
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦀 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n\n"
-            f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
-            f"[🛍 Merch](https://micropets.store/) "
-            f"[💖 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"🔼 Holding Change: {holding_change_text}\n"
+            f"🤑 Hodler: {shorten_address(wallet_address)}\n"
+            f"[🔍 View on BscScan]({tx_url})\n\n"
+            f"💰 [Staking](https://pets.micropets.io/petdex) "
+            f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
+            f"🛍 [Merch](https://micropets.store/) "
+            f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await context.bot.send_message(chat_id, message, parse_mode='Markdown')
         await context.bot.send_message(chat_id, "🚖 OK")
@@ -829,9 +758,6 @@ async def webhook(request: Request):
         return {"status": "OK"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
-        if len(recent_errors) > 5:
-            recent_errors.pop(0)
         return {"status": "error"}, 500
 
 @app.on_event("startup")
@@ -839,13 +765,18 @@ async def startup_event():
     logger.info("Starting bot on Railway")
     try:
         await bot_app.initialize()
-        logger.info("Bot initialized")
         webhook_url = f"https://{APP_URL}/webhook"
-        await bot_app.bot.set_webhook(webhook_url)
+        await bot_app.bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set: {webhook_url}")
         asyncio.create_task(monitor_transactions(bot_app))
     except Exception as e:
         logger.error(f"Startup error: {e}")
+        # Attempt to send error to admin
+        if ADMIN_CHAT_ID:
+            await bot_app.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=f"🚨 Bot startup failed: {str(e)}"
+            )
         raise SystemExit(1)
 
 @app.on_event("shutdown")
