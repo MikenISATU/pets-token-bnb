@@ -14,7 +14,7 @@ from decimal import Decimal
 import json
 import telegram
 
-# Logging setup
+# Logging setup with timestamps
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -39,17 +39,18 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
-BNB_RPC_URL = os.getenv('BNB_RPC_URL', 'https://bsc-dataseed.binance.org/')  # Default fallback
+BNB_RPC_URL = os.getenv('BNB_RPC_URL', 'https://bsc-dataseed.binance.org/')
 CONTRACT_ADDRESS = Web3.to_checksum_address(os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3'))
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
-POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 60))
+POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', 120))  # Increased to 2 minutes to reduce load
 
 # Validate environment variables
 required_vars = {
     'TELEGRAM_BOT_TOKEN': TELEGRAM_BOT_TOKEN,
+    'CLOUDINARY_CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
     'APP_URL': APP_URL,
     'BSCSCAN_API_KEY': BSCSCAN_API_KEY,
     'CONTRACT_ADDRESS': CONTRACT_ADDRESS,
@@ -63,7 +64,7 @@ if missing_vars:
 logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=*****, BSCSCAN_API_KEY=*****, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, PORT={PORT}")
 
 # Constants
-TARGET_ADDRESS = Web3.to_checksum_address('0x4bdece4e422fa015336234e4fc4d39ae6dd75b01')  # Correct PETS/BNB pair address
+TARGET_ADDRESS = Web3.to_checksum_address('0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01')  # PETS/BNB pair
 EMOJI = '💰'
 
 # PancakeSwap Pair ABI
@@ -169,7 +170,7 @@ def get_bnb_to_usd():
         return price
     except Exception as e:
         logger.error(f"Error fetching BNB price: {e}")
-        return 658.96  # Fallback price based on recent DexTools data
+        return 658.96  # Fallback price based on recent data
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_pets_price_from_coingecko():
@@ -215,7 +216,7 @@ def get_pets_price_from_pancakeswap():
         pair_contract = w3.eth.contract(address=TARGET_ADDRESS, abi=PANCAKESWAP_PAIR_ABI)
         reserves = pair_contract.functions.getReserves().call()
         reserve0, reserve1, _ = reserves
-        # Assuming WBNB is token0, PETS is token1
+        # WBNB is token0, PETS is token1
         bnb_per_pets = reserve0 / reserve1 / 1e18  # WBNB per PETS
         bnb_to_usd = get_bnb_to_usd()
         pets_price_usd = bnb_per_pets * bnb_to_usd
@@ -234,7 +235,7 @@ def get_pets_price_from_pancakeswap():
             logger.info(f"Fallback $PETS price from CoinMarketCap: ${pets_price_usd:.10f}")
             return pets_price_usd
         logger.warning("Using hardcoded PETS price as last resort")
-        return 0.03890  # Matches DexTools price
+        return 0.00001395  # Matches DexTools calculation
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -250,7 +251,7 @@ def get_token_supply():
         logger.error(f"API Error fetching token supply: {data['message']}")
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
-    return 6600000000  # Fallback to match DexTools total supply
+    return 6600000000  # Corrected to match DexTools total supply
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap():
@@ -272,7 +273,7 @@ def extract_market_cap():
         return market_cap_int
     except Exception as e:
         logger.error(f"Error calculating market cap: {e}")
-        return 92120  # Fallback to match DexTools market cap
+        return 92120  # Fallback to match DexTools
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
@@ -751,13 +752,20 @@ async def get_transactions():
 
 @app.post("/webhook")
 async def webhook(request: Request):
+    start_time = datetime.now()
     logger.info("Received webhook")
     try:
         update = Update.de_json(await request.json(), bot_app.bot)
         await bot_app.process_update(update)
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"Webhook processed in {elapsed:.2f} seconds")
         return {"status": "OK"}
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.error(f"Webhook error after {elapsed:.2f} seconds: {e}")
+        recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+        if len(recent_errors) > 5:
+            recent_errors.pop(0)
         return {"status": "error"}, 500
 
 @app.on_event("startup")
@@ -771,7 +779,6 @@ async def startup_event():
         asyncio.create_task(monitor_transactions(bot_app))
     except Exception as e:
         logger.error(f"Startup error: {e}")
-        # Attempt to send error to admin
         if ADMIN_CHAT_ID:
             await bot_app.bot.send_message(
                 chat_id=ADMIN_CHAT_ID,
