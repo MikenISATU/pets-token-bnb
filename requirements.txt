@@ -1,7 +1,7 @@
+fastapi==0.115.0
 python-telegram-bot==20.8
-fastapi
-uvicorn
-requests
-web3
-tenacity
-python-dotenv
+web3==7.2.0
+tenacity==9.0.0
+python-dotenv==1.0.1
+requests==2.32.3
+uvicorn==0.30.6
