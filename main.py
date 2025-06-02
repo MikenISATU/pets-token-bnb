@@ -1,11 +1,9 @@
-
-
 import os
 import logging
 import requests
 import random
 from fastapi import FastAPI, Request
-from telegram import Update  # Fixed import
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
 from web3 import Web3
 from tenacity import retry, stop_after_attempt, wait_fixed
@@ -42,7 +40,7 @@ CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
 APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))  # Railway-specific
 BSCSCAN_API_KEY = os.getenv('BSCSCAN_API_KEY')
 BNB_RPC_URL = os.getenv('BNB_RPC_URL')
-CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edad0bb597fe9f008f568b00d25fe3')
+CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3').lower()
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 PORT = int(os.getenv('PORT', 8080))  # Railway assigns PORT
@@ -69,7 +67,7 @@ if missing_vars:
 logger.info(f"Environment variables loaded: APP_URL={APP_URL}, TELEGRAM_BOT_TOKEN=*****, BSCSCAN_API_KEY=*****, CLOUDINARY_CLOUD_NAME={CLOUDINARY_CLOUD_NAME}, ADMIN_CHAT_ID={ADMIN_CHAT_ID}, CONTRACT_ADDRESS={CONTRACT_ADDRESS}, PORT={PORT}, BNB_RPC_URL=*****")
 
 # Constants
-TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'
+TARGET_ADDRESS = '0x4BDECe4E422fA015336234e4fC4D39ae6dD75b01'.lower()
 EMOJI = '💰'
 
 # PancakeSwap Pair ABI
@@ -151,7 +149,7 @@ def load_posted_transactions():
             return set(line.strip() for line in f)
     except Exception as e:
         logger.warning(f"Could not load posted_transactions.txt: {e}")
-        return set()  # Fallback to empty set for Railway's ephemeral filesystem
+        return set()
 
 def log_posted_transaction(transaction_hash):
     try:
@@ -226,9 +224,12 @@ def get_pets_price_from_pancakeswap():
         pair_contract = w3.eth.contract(address=pair_address, abi=PANCAKESWAP_PAIR_ABI)
         reserves = pair_contract.functions.getReserves().call()
         reserve0, reserve1, _ = reserves
-        bnb_per_pets = reserve1 / reserve0 / 1e18
+        # WBNB is token0, PETS is token1, so reserve0/reserve1 gives BNB per PETS
+        bnb_per_pets = reserve0 / reserve1 / 1e18
         bnb_to_usd = get_bnb_to_usd()
         pets_price_usd = bnb_per_pets * bnb_to_usd
+        if pets_price_usd <= 0:
+            raise ValueError("Invalid PETS price from PancakeSwap")
         logger.info(f"Fetched $PETS price from PancakeSwap: ${pets_price_usd:.10f}")
         return pets_price_usd
     except Exception as e:
@@ -241,7 +242,7 @@ def get_pets_price_from_pancakeswap():
         if pets_price_usd:
             logger.info(f"Fallback $PETS price from CoinMarketCap: ${pets_price_usd:.10f}")
             return pets_price_usd
-        return 0.000004011
+        return 0.00004014  # Adjusted to match ~$256K market cap with 6.38B supply
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_token_supply():
@@ -257,51 +258,7 @@ def get_token_supply():
         logger.error(f"API Error fetching token supply: {data['message']}")
     except Exception as e:
         logger.error(f"Error fetching token supply from BscScan: {e}")
-    return 10000000000
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def get_market_cap_from_coingecko():
-    try:
-        response = requests.get(
-            'https://api.coingecko.com/api/v3/coins/micropets',
-            timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-        market_cap = float(data.get('market_data', {}).get('market_cap', {}).get('usd', 0))
-        if market_cap == 0:
-            logger.warning("CoinGecko returned zero market cap for $PETS")
-            return None
-        logger.info(f"Fetched market cap from CoinGecko: ${market_cap:,.0f}")
-        return market_cap
-    except Exception as e:
-        logger.error(f"Error fetching market cap from CoinGecko: {e}")
-        return None
-
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
-def get_market_cap_from_coinmarketcap():
-    if not COINMARKETCAP_API_KEY:
-        logger.warning("CoinMarketCap API key not provided, skipping")
-        return None
-    try:
-        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-        headers = {
-            'Accepts': 'application/json',
-            'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY
-        }
-        params = {
-            'symbol': 'PETS',
-            'convert': 'USD'
-        }
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        market_cap = float(data['data']['PETS']['quote']['USD']['market_cap'])
-        logger.info(f"Fetched market cap from CoinMarketCap: ${market_cap:,.0f}")
-        return market_cap
-    except Exception as e:
-        logger.error(f"Error fetching market cap from CoinMarketCap: {e}")
-        return None
+    return 6380000000  # Adjusted to match DexTools ~$256K market cap
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def extract_market_cap():
@@ -337,10 +294,11 @@ def extract_market_cap():
             last_market_cap_cache = datetime.now().timestamp() * 1000
             logger.info(f"Fallback market cap from CoinMarketCap: ${market_cap_int:,.0f}")
             return market_cap_int
-        return 401073
+        return 256000  # Fallback to match DexTools ~$256K
 
 @retry(stop=stop_after_attempt(3), wait=wait_fixed(3))
 def get_transaction_details(transaction_hash):
+    # For token transfers, use the transaction value directly; BNB value is typically 0
     url = f"https://api.bscscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}"
     try:
         response = requests.get(url, timeout=30)
@@ -352,10 +310,10 @@ def get_transaction_details(transaction_hash):
             logger.info(f"Transaction {transaction_hash}: BNB value={bnb_value:.6f}")
             return bnb_value
         logger.error(f"No transaction details for {transaction_hash}")
-        return None
+        return 0.0
     except Exception as e:
         logger.error(f"Error fetching transaction details for {transaction_hash}: {e}")
-        return None
+        return 0.0
 
 def check_execute_function(transaction_hash):
     url = f"https://api.bscscan.com/api?module=transaction&action=gettxreceiptstatus&txhash={transaction_hash}&apikey={BSCSCAN_API_KEY}"
@@ -378,8 +336,7 @@ def check_execute_function(transaction_hash):
         return is_execute, bnb_value
     except Exception as e:
         logger.error(f"Error checking transaction {transaction_hash}: {e}")
-        bnb_value = get_transaction_details(transaction_hash)
-        return False, bnb_value
+        return False, 0.0
 
 def get_balance_before_transaction(wallet_address, block_number):
     url = f"https://api.bscscan.com/api?module=account&action=tokenbalancehistory&contractaddress={CONTRACT_ADDRESS}&address={wallet_address}&blockno={block_number}&apikey={BSCSCAN_API_KEY}"
@@ -465,20 +422,15 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         logger.info(f"Transaction {transaction['transactionHash']} already processed")
         return False
 
-    is_execute, bnb_value = check_execute_function(transaction['transactionHash'])
-    if not bnb_value:
-        logger.info(f"Transaction {transaction['transactionHash']} lacks BNB value")
-        return False
-
+    is_execute, _ = check_execute_function(transaction['transactionHash'])
     pets_amount = float(transaction['value']) / 1e18
     usd_value = pets_amount * pets_price
     logger.info(
         f"Transaction {transaction['transactionHash']}: "
-        f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}, "
-        f"BNB={bnb_value:.6f} (${(bnb_value * bnb_to_usd_rate):,.2f})"
+        f"PETS={pets_amount:,.0f}, USD={usd_value:,.2f}, PETS_price={pets_price:.10f}"
     )
-    if usd_value < 50:
-        logger.info(f"Transaction {transaction['transactionHash']} below threshold $50")
+    if usd_value < 5:  # Changed threshold to $5
+        logger.info(f"Transaction {transaction['transactionHash']} below threshold $5")
         return False
 
     market_cap = extract_market_cap()
@@ -489,7 +441,7 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         balance_before + Decimal(pets_amount) if balance_before is not None else None
     )
     holding_change_text = f"+{percent_increase:.2f}%" if percent_increase else "N/A"
-    emoji_count = min(int(usd_value) // 50, 100)
+    emoji_count = min(int(usd_value) // 5, 100)  # Adjusted for $5 threshold
     emojis = EMOJI * emoji_count
     tx_url = f"https://bscscan.com/tx/{transaction['transactionHash']}"
     category = categorize_buy(usd_value)
@@ -500,7 +452,6 @@ async def process_transaction(context, transaction, bnb_to_usd_rate, pets_price,
         f"{emojis}\n"
         f"💰 [$PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS}): "
         f"{pets_amount:,.0f} (${usd_value:,.2f})\n"
-        f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
         f"🏦 Market Cap: ${market_cap:,.0f}\n"
         f"🔼 Holding Change: {holding_change_text}\n"
         f"🤑 Hodler: {shorten_address(wallet_address)}\n"
@@ -720,14 +671,14 @@ async def test(update: Update, context):
     try:
         test_tx_hash = '0xRandomTestTx'
         test_pets_amount = random.randint(1000, 50000)
-        usd_value = random.uniform(50, 500)
+        usd_value = random.uniform(5, 500)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / 1000
+        bnb_value = usd_value / bnb_to_usd_rate
         pets_price = get_pets_price_from_pancakeswap()
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(usd_value) // 50, 100)
+        emoji_count = min(int(usd_value) // 5, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
         holding_change_text = "N/A"
@@ -739,13 +690,13 @@ async def test(update: Update, context):
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦲 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n\n"
-            f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
-            f"[🛍 Merch](https://micropets.store/) "
-            f"[🤑 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"🔼 Holding Change: {holding_change_text}\n"
+            f"🤑 Hodler: {shorten_address(wallet_address)}\n"
+            f"[🔍 View on BscScan]({tx_url})\n\n"
+            f"💰 [Staking](https://pets.micropets.io/petdex) "
+            f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
+            f"🛍 [Merch](https://micropets.store/) "
+            f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await send_video_with_retry(
             context,
@@ -771,12 +722,12 @@ async def no_video(update: Update, context):
     try:
         test_tx_hash = '0xRandomTestNoV'
         test_pets_amount = random.randint(1000, 50000)
-        usd_value = random.uniform(50, 5000)
+        usd_value = random.uniform(5, 5000)
         bnb_to_usd_rate = get_bnb_to_usd()
-        bnb_value = usd_value / 1000
+        bnb_value = usd_value / bnb_to_usd_rate
         pets_price = get_pets_price_from_pancakeswap()
         wallet_address = f"0x{random.randint(10**15, 10**16):0>40x}"
-        emoji_count = min(int(usd_value) // 50, 100)
+        emoji_count = min(int(usd_value) // 5, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
         holding_change_text = "N/A"
@@ -788,13 +739,13 @@ async def no_video(update: Update, context):
             f"{test_pets_amount:,.0f} (${(test_pets_amount * pets_price):,.2f})\n"
             f"💵 BNB Value: {bnb_value:,.4f} (${(bnb_value * bnb_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦀 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n\n"
-            f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/address/{TARGET_ADDRESS}) "
-            f"[🛍 Merch](https://micropets.store/) "
-            f"[💖 Buy](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
+            f"🔼 Holding Change: {holding_change_text}\n"
+            f"🤑 Hodler: {shorten_address(wallet_address)}\n"
+            f"[🔍 View on BscScan]({tx_url})\n\n"
+            f"💰 [Staking](https://pets.micropets.io/petdex) "
+            f"📈 [Chart](https://www.dextools.io/app/en/bnb/pair-explorer/{TARGET_ADDRESS}) "
+            f"🛍 [Merch](https://micropets.store/) "
+            f"🤑 [Buy $PETS](https://pancakeswap.finance/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await context.bot.send_message(chat_id, message, parse_mode='Markdown')
         await context.bot.send_message(chat_id, "🚖 OK")
@@ -865,4 +816,3 @@ if __name__ == "__main__":
     import uvicorn
     logger.info(f"Starting Uvicorn server on port {PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-
