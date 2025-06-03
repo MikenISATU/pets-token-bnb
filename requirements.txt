@@ -4,4 +4,5 @@ web3==7.2.0
 tenacity==9.0.0
 python-dotenv==1.0.1
 requests==2.32.3
+aiohttp==3.10.5
 uvicorn==0.30.6
