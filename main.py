@@ -1,3 +1,5 @@
+eth code pets:
+
 import os
 import logging
 import requests
@@ -41,15 +43,14 @@ if not telegram.__version__.startswith('20'):
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL', 'https://pets-token-bnb-production.up.railway.app'))
+APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY')
 INFURA_URL = os.getenv('INFURA_URL')
-# TODO: Update with correct $PETS/ETH token address
 CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3')
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
-# TODO: Update with correct Uniswap V2 pair address for $PETS/ETH
 TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x98b794be9c4f49900c6193aaff20876e1f36043e')
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 
@@ -79,9 +80,9 @@ for addr, name in [(CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'), (TARGET_ADDRESS, 'TAR
         raise ValueError(f"Invalid Ethereum address for {name}: {addr}")
 
 if not COINMARKETCAP_API_KEY:
-    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls may be limited")
+    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls will be skipped")
 
-logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT=8080")
+logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 
 # Constants
 EMOJI = '💰'
@@ -188,30 +189,91 @@ def log_posted_transaction(transaction_hash: str) -> None:
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_eth_to_usd() -> float:
     try:
+        headers = {'Accept': 'application/json;version=20230302'}
         response = requests.get(
-            "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-            headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
-            params={'symbol': 'ETH', 'convert': 'USD'},
+            f"https://api.geckoterminal.com/api/v2/simple/networks/eth/token_price/{ETH_ADDRESS}",
+            headers=headers,
             timeout=10
         )
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"CoinMarketCap ETH response: {data}")
-        price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
-        if not price_str or float(price_str) <= 0:
-            raise ValueError("Invalid or missing price data from CoinMarketCap")
+        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(ETH_ADDRESS.lower(), '0')
+        if not isinstance(price_str, (str, float, int)) or not price_str:
+            raise ValueError("Invalid price data from GeckoTerminal")
         price = float(price_str)
-        logger.info(f"ETH price from CoinMarketCap: ${price:.2f}")
+        if price <= 0:
+            raise ValueError("GeckoTerminal returned non-positive price")
+        logger.info(f"ETH price from GeckoTerminal: ${price:.2f}")
+        time.sleep(0.5)
         return price
-    except Exception as cmc_e:
-        logger.error(f"CoinMarketCap ETH price fetch failed: {cmc_e}")
-        return 3000
+    except Exception as e:
+        logger.error(f"GeckoTerminal ETH price fetch failed: {e}, status={getattr(e.response, 'status_code', 'N/A')}")
+        if not COINMARKETCAP_API_KEY:
+            logger.warning("Skipping CoinMarketCap due to missing API key")
+            return 3000  # Fallback ETH price
+        try:
+            response = requests.get(
+                "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+                headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
+                params={'symbol': 'ETH', 'convert': 'USD'},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price', '0')
+            if not isinstance(price_str, (str, float, int)) or not price_str:
+                raise ValueError("Invalid price data from CoinMarketCap")
+            price = float(price_str)
+            if price <= 0:
+                raise ValueError("CoinMarketCap returned non-positive price")
+            logger.info(f"ETH price from CoinMarketCap: ${price:.2f}")
+            return price
+        except Exception as cmc_e:
+            logger.error(f"CoinMarketCap ETH price fetch failed: {cmc_e}")
+            return 3000  # Fallback ETH price
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_pets_price_from_uniswap() -> float:
-    if not COINMARKETCAP_API_KEY:
-        logger.warning("Skipping CoinMarketCap due to missing API key")
-    else:
+    try:
+        headers = {'Accept': 'application/json;version=20230302'}
+        response = requests.get(
+            f"https://api.geckoterminal.com/api/v2/simple/networks/eth/token_price/{CONTRACT_ADDRESS}",
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(CONTRACT_ADDRESS.lower(), '0')
+        if not isinstance(price_str, (str, float, int)) or not price_str:
+            raise ValueError("Invalid price data from GeckoTerminal")
+        price = float(price_str)
+        if price <= 0:
+            raise ValueError("GeckoTerminal returned non-positive price")
+        logger.info(f"$PETS price from GeckoTerminal: ${price:.10f}")
+        time.sleep(0.5)
+        return price
+    except Exception as e:
+        logger.error(f"GeckoTerminal $PETS price fetch failed: {e}, status={getattr(e.response, 'status_code', 'N/A')}")
+        if not COINMARKETCAP_API_KEY:
+            logger.warning("Skipping CoinMarketCap due to missing API key")
+            try:
+                pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
+                pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
+                reserves = pair_contract.functions.getReserves().call()
+                token0 = pair_contract.functions.token0().call()
+                is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
+                reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
+                reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
+                eth_per_pets = reserve_eth / reserve_pets / 1e18 if reserve_pets > 0 else 0
+                eth_to_usd = get_eth_to_usd()
+                price = eth_per_pets * eth_to_usd
+                if price <= 0:
+                    raise ValueError("Uniswap returned non-positive price")
+                logger.info(f"$PETS price from Uniswap: ${price:.10f}")
+                return price
+            except Exception as uni_e:
+                logger.error(f"Uniswap $PETS price fetch failed: {uni_e}")
+                return 0.00003886
         try:
             response = requests.get(
                 "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
@@ -221,36 +283,34 @@ def get_pets_price_from_uniswap() -> float:
             )
             response.raise_for_status()
             data = response.json()
-            logger.debug(f"CoinMarketCap $PETS response: {data}")
-            price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price')
-            if not price_str or float(price_str) <= 0:
-                raise ValueError("Invalid or missing price data from CoinMarketCap")
+            price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price', '0')
+            if not isinstance(price_str, (str, float, int)) or not price_str:
+                raise ValueError("Invalid price data from CoinMarketCap")
             price = float(price_str)
+            if price <= 0:
+                raise ValueError("CoinMarketCap returned non-positive price")
             logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
             return price
         except Exception as cmc_e:
             logger.error(f"CoinMarketCap $PETS price fetch failed: {cmc_e}")
-    try:
-        pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
-        pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
-        reserves = pair_contract.functions.getReserves().call()
-        token0 = pair_contract.functions.token0().call()
-        logger.debug(f"Uniswap pair token0: {token0}, reserves: {reserves}")
-        is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
-        reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
-        reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
-        if reserve_pets <= 0:
-            raise ValueError("Zero PETS reserve in Uniswap pair")
-        eth_per_pets = reserve_eth / reserve_pets / 1e18
-        eth_to_usd = get_eth_to_usd()
-        price = eth_per_pets * eth_to_usd
-        if price <= 0:
-            raise ValueError("Uniswap returned non-positive price")
-        logger.info(f"$PETS price from Uniswap: ${price:.10f}")
-        return price
-    except Exception as uni_e:
-        logger.error(f"Uniswap $PETS price fetch failed: {uni_e}")
-        return 0.00003886
+            try:
+                pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
+                pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
+                reserves = pair_contract.functions.getReserves().call()
+                token0 = pair_contract.functions.token0().call()
+                is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
+                reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
+                reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
+                eth_per_pets = reserve_eth / reserve_pets / 1e18 if reserve_pets > 0 else 0
+                eth_to_usd = get_eth_to_usd()
+                price = eth_per_pets * eth_to_usd
+                if price <= 0:
+                    raise ValueError("Uniswap returned non-positive price")
+                logger.info(f"$PETS price from Uniswap: ${price:.10f}")
+                return price
+            except Exception as uni_e:
+                logger.error(f"Uniswap $PETS price fetch failed: {uni_e}")
+                return 0.00003886
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_token_supply() -> float:
@@ -261,19 +321,19 @@ def get_token_supply() -> float:
         )
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"Etherscan token supply response: {data}")
         if not isinstance(data, dict) or data.get('status') != '1':
             logger.error(f"Etherscan API error: {data.get('message', 'No message')}")
-            return 10_000_000_000_000  # Fallback for $PETS
+            return 6_604_885_020
         supply_str = data.get('result', '0')
         if not isinstance(supply_str, str) or not supply_str.isdigit():
             raise ValueError("Invalid token supply data from Etherscan")
         supply = int(supply_str) / 1e18
         logger.info(f"Token supply: {supply:,.0f} tokens")
+        time.sleep(0.5)
         return supply
     except Exception as e:
         logger.error(f"Failed to fetch token supply: {e}")
-        return 10_000_000_000_000  # Fallback for $PETS
+        return 6_604_885_020
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def extract_market_cap() -> int:
@@ -299,7 +359,6 @@ def get_transaction_details(transaction_hash: str) -> Optional[float]:
         )
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"Etherscan transaction details response: {data}")
         if not isinstance(data, dict) or 'result' not in data:
             logger.error(f"Invalid response for transaction {transaction_hash}: {data}")
             return None
@@ -330,7 +389,6 @@ def check_execute_function(transaction_hash: str) -> tuple[bool, Optional[float]
         )
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"Etherscan receipt status response: {data}")
         if not isinstance(data, dict) or 'result' not in data:
             logger.error(f"Invalid receipt status response for {transaction_hash}: {data}")
             return False, None
@@ -349,7 +407,6 @@ def check_execute_function(transaction_hash: str) -> tuple[bool, Optional[float]
         )
         tx_response.raise_for_status()
         tx_data = tx_response.json()
-        logger.debug(f"Etherscan transaction response: {tx_data}")
         if not isinstance(tx_data, dict) or 'result' not in tx_data:
             logger.error(f"Invalid transaction response for {transaction_hash}: {tx_data}")
             return False, eth_value
@@ -370,7 +427,6 @@ def get_balance_before_transaction(wallet_address: str, block_number: int) -> Op
         )
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"Etherscan balance response: {data}")
         if data.get('status') == '1':
             balance_str = data.get('result', '0')
             if not isinstance(balance_str, str) or not balance_str.isdigit():
@@ -406,14 +462,8 @@ async def fetch_etherscan_transactions(startblock: Optional[int] = None, endbloc
         response = requests.get("https://api.etherscan.io/api", params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"Etherscan transactions response: {data}")
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid Etherscan response: {data}")
-        if data.get('status') == '0' and data.get('message') == 'No transactions found':
-            logger.info("No transactions found in Etherscan response")
-            return []
-        if data.get('status') != '1':
-            raise ValueError(f"Etherscan API error: {data.get('message', 'No message')}")
+        if not isinstance(data, dict) or data.get('status') != '1':
+            raise ValueError(f"Invalid Etherscan response: {data.get('message', 'No message')}")
         transactions = [
             {
                 'transactionHash': tx['hash'],
@@ -561,7 +611,7 @@ async def set_webhook_with_retry(bot_app) -> bool:
     logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://{APP_URL}/health", timeout=15) as response:
+            async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
                 if response.status != 200:
                     logger.error(f"Health check failed, status {response.status}, response: {await response.text()}")
                     raise Exception(f"Health check failed, status {response.status}")
@@ -578,23 +628,24 @@ async def set_webhook_with_retry(bot_app) -> bool:
 async def polling_fallback(bot_app) -> None:
     global polling_task
     logger.info("Starting polling fallback")
-    try:
-        if not bot_app.running:
-            await bot_app.initialize()
-            await bot_app.start()
-            await bot_app.updater.start_polling(
-                poll_interval=3,
-                timeout=10,
-                drop_pending_updates=True,
-                error_callback=lambda e: logger.error(f"Polling error: {e}")
-            )
-            logger.info("Polling started successfully")
-            while polling_task and not polling_task.cancelled():
-                await asyncio.sleep(60)
-        else:
-            logger.warning("Bot already running, skipping polling start")
-            while polling_task and not polling_task.cancelled():
-                await asyncio.sleep(60)
+    while True:
+        try:
+            if not bot_app.running:
+                await bot_app.initialize()
+                await bot_app.start()
+                await bot_app.updater.start_polling(
+                    poll_interval=3,
+                    timeout=10,
+                    drop_pending_updates=True,
+                    error_callback=lambda e: logger.error(f"Polling error: {e}")
+                )
+                logger.info("Polling started successfully")
+                while polling_task and not polling_task.cancelled():
+                    await asyncio.sleep(60)
+            else:
+                logger.warning("Bot already running, skipping polling start")
+                while polling_task and not polling_task.cancelled():
+                    await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Polling error: {e}")
             await asyncio.sleep(10)
@@ -613,40 +664,30 @@ def is_admin(update: Update) -> bool:
 
 # Command handlers
 async def start(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chatting:
-        logger.error("Invalid chat object in /start command")
-        return
-    active_chats.add(chat_id)
+    chat_id = update.effective_chat.id
+    active_chats.add(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="👋 Welcome to PETS Tracker! Use /track to start buy alerts.")
 
 async def track(update: Update, context) -> None:
     global is_tracking_enabled, monitoring_task
-    chat_id = str(update.effective_chat.id))
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /track command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     if is_tracking_enabled and monitoring_task:
         await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled")
-        return True
+        return
     is_tracking_enabled = True
-    active_chats.add(chat_id)
+    active_chats.add(str(chat_id))
     monitoring_task = asyncio.create_task(monitor_transactions(context))
-    logger.info("Tracking started")
     await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started")
 
 async def stop(update: Update, context) -> None:
     global is_tracking_enabled, monitoring_task
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /stop command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     is_tracking_enabled = False
     if monitoring_task:
         monitoring_task.cancel()
@@ -659,43 +700,34 @@ async def stop(update: Update, context) -> None:
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
 
 async def stats(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /stats command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching $PETS data for the last 2 weeks")
     try:
         latest_block_response = requests.get(
             f"https://api.etherscan.io/api?module=proxy&action=eth_blockNumber&apikey={ETHERSCAN_API_KEY}",
             timeout=30
-            ,
         )
         latest_block_response.raise_for_status()
         latest_block_data = latest_block_response.json()
-        logger.debug(f"Etherscan block number response: {latest_block_data}")
-        if not isinstance(latest_block_data, dict):
-            logger.error(f"Invalid block number response")
-            raise ValueError(f"Invalid block number response: {latest_block_data}")
-        if 'result' not in latest_block_data:
-            logger.error(f" error: 'result' not found in block number response")
+        if not isinstance(latest_block_data, dict) or 'result' not in latest_block_data:
             raise ValueError(f"Invalid block number response: {latest_block_data}")
         latest_block = int(latest_block_data['result'], 16)
-        blocks_per_day = 24 * 60 * 60 // 12  # Approximate Ethereum block time
+        blocks_per_day = 24 * 60 * 60 // 12  # Ethereum ~12s block time
         start_block = latest_block - (14 * blocks_per_day)
         txs = await fetch_etherscan_transactions(startblock=start_block, endblock=latest_block)
         if not txs:
             logger.info("No transactions found for the last 2 weeks")
             await context.bot.send_message(chat_id=chat_id, text="🚫 No recent buys found")
-            return None
+            return
         two_weeks_ago = int((datetime.now() - timedelta(days=14)).timestamp())
         recent_txs = [tx for tx in txs if isinstance(tx, dict) and tx.get('timeStamp', 0) >= two_weeks_ago]
         if not recent_txs:
             logger.info("No transactions within the last two weeks")
             await context.bot.send_message(chat_id=chat_id, text="🚫 No buys found in the last 2 weeks")
-            return None
+            return
         eth_to_usd_rate = get_eth_to_usd()
         pets_price = get_pets_price_from_uniswap()
         processed = []
@@ -727,13 +759,10 @@ async def stats(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch data: {str(e)}")
 
 async def help_command(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /help command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
@@ -752,13 +781,10 @@ async def help_command(update: Update, context) -> None:
     )
 
 async def status(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /status command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     await context.bot.send_message(
         chat_id=chat_id,
         text=f"🔍 *Status:* {'Enabled' if is_tracking_enabled else 'Disabled'}",
@@ -766,13 +792,10 @@ async def status(update: Update, context) -> None:
     )
 
 async def debug(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /debug command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     status = {
         'trackingEnabled': is_tracking_enabled,
         'activeChats': list(active_chats),
@@ -792,13 +815,10 @@ async def debug(update: Update, context) -> None:
     )
 
 async def test(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /test command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test buy")
     try:
         test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
@@ -819,7 +839,7 @@ async def test(update: Update, context) -> None:
             f"🚖 *MicroPets Buy!* Test\n\n"
             f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH Value: {eth_value:,.4f} (${usd_value:.2f})\n"
+            f"💵 ETH Value: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
             f"🔼 Holding: {holding_change_text}\n"
             f"🦒 Hodler: {shorten_address(wallet_address)}\n"
@@ -836,13 +856,10 @@ async def test(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed: {str(e)}")
 
 async def no_video(update: Update, context) -> None:
-    chat_id = str(update.effective_chat.id)
-    if not update.effective_chat:
-        logger.error("Invalid chat object in /noV command")
-        return None
+    chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return None
+        return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Testing buy (no video)")
     try:
         test_tx_hash = f"0xTestNoV{uuid.uuid4().hex[:16]}"
@@ -861,7 +878,7 @@ async def no_video(update: Update, context) -> None:
             f"🚖 *MicroPets Buy!* Ethereum\n\n"
             f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH: {eth_value:,.4f} (${usd_value:.2f})\n"
+            f"💵 ETH: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
             f"🔼 Holding: {holding_change_text}\n"
             f"🦀 Hodler: {shorten_address(wallet_address)}\n"
@@ -872,26 +889,29 @@ async def no_video(update: Update, context) -> None:
             f"[💖 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        await context.bot.send_message(chat_id=chat_id, text="Purchase")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 OK")
     except Exception as e:
         logger.error(f"/noV error: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
 
 # FastAPI routes
+app = FastAPI()
+
 @app.get("/health")
 async def health_check():
     logger.info("Health check endpoint called")
     try:
-        # Simplified check to avoid Web3 delays
-        return {"status": "OK"}"""
+        if not w3.is_connected():
+            raise Exception("Web3 is not connected")
+        return {"status": "Connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
 
 @app.get("/webhook")
 async def webhook_get():
     logger.info("Received GET webhook")
-    return {"error": "Method Not Allowed"}, 405
+    raise HTTPException(status_code=405, detail="Method Not Allowed")
 
 @app.get("/api/transactions")
 async def get_transactions():
@@ -900,7 +920,7 @@ async def get_transactions():
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    logger.info("Received POST webhook")
+    logger.info("Received POST webhook request")
     try:
         async with aiohttp.ClientSession() as session:
             data = await request.json()
@@ -910,7 +930,7 @@ async def webhook(request: Request):
             update = Update.de_json(data, bot_app.bot)
             if update:
                 await bot_app.process_update(update)
-            return {"status": "ok"}, 200
+            return {"status": "ok"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
@@ -921,7 +941,7 @@ async def webhook(request: Request):
 # Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global bot_app, monitoring_task, polling_task
+    global monitoring_task, polling_task
     logger.info("Starting bot application")
     try:
         await bot_app.initialize()
@@ -930,15 +950,16 @@ async def lifespan(app: FastAPI):
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
             logger.info("Webhook set successfully")
         except Exception as e:
-            logger.error(f"Webhook setup failed: {str(e)}. Switching to polling")
+            logger.error(f"Webhook setup failed: {e}. Switching to polling")
             polling_task = asyncio.create_task(polling_fallback(bot_app))
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
-            logger.info("Polling started")
-            yield
+            logger.info("Polling started, monitoring enabled")
+        logger.info("Bot startup completed")
+        yield
     except Exception as e:
-        logger.error(f"Startup error: {str(e)}")
+        logger.error(f"Startup error: {e}")
     finally:
-        logger.info("Initiating shutdown...")
+        logger.info("Initiating bot shutdown...")
         try:
             if monitoring_task:
                 monitoring_task.cancel()
@@ -952,18 +973,16 @@ async def lifespan(app: FastAPI):
                 try:
                     await polling_task
                 except asyncio.CancelledError:
-                    logger.info("Polling cancelled")
-                except Exception as e:
-                    logger.error(f"Error stopping polling: {e}")
+                    logger.info("Polling task cancelled")
                 polling_task = None
             if bot_app.running:
                 try:
                     await bot_app.updater.stop()
                     await bot_app.stop()
-                    await bot_app.shutdown()
                 except Exception as e:
-                    logger.error(f"Error during shutdown: {e}")
+                    logger.error(f"Error stopping bot: {e}")
             await bot_app.bot.delete_webhook(drop_pending_updates=True)
+            await bot_app.shutdown()
             logger.info("Bot shutdown completed")
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
@@ -971,10 +990,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # Bot initialization
-bot_app = ApplicationBuilder()\
-    .token(TELEGRAM_BOT_TOKEN)\
+bot_app = ApplicationBuilder() \
+    .token(TELEGRAM_BOT_TOKEN) \
     .build()
-
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CommandHandler("track", track))
 bot_app.add_handler(CommandHandler("stop", stop))
@@ -987,5 +1005,5 @@ bot_app.add_handler(CommandHandler("noV", no_video))
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting Uvicorn server on port 8080")
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    logger.info(f"Starting Uvicorn server on port {PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
