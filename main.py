@@ -41,14 +41,15 @@ if not telegram.__version__.startswith('20'):
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
-APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL'))
+APP_URL = os.getenv('RAILWAY_PUBLIC_DOMAIN', os.getenv('APP_URL', 'https://pets-token-bnb-production.up.railway.app'))
 ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY')
 INFURA_URL = os.getenv('INFURA_URL')
+# TODO: Update with correct $PETS/ETH token address
 CONTRACT_ADDRESS = os.getenv('CONTRACT_ADDRESS', '0x2466858ab5edAd0BB597FE9f008F568B00d25Fe3')
 ADMIN_CHAT_ID = os.getenv('ADMIN_USER_ID')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
+# TODO: Update with correct Uniswap V2 pair address for $PETS/ETH
 TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x98b794be9c4f49900c6193aaff20876e1f36043e')
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 
@@ -78,9 +79,9 @@ for addr, name in [(CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'), (TARGET_ADDRESS, 'TAR
         raise ValueError(f"Invalid Ethereum address for {name}: {addr}")
 
 if not COINMARKETCAP_API_KEY:
-    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls will be skipped")
+    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls may be limited")
 
-logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
+logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT=8080")
 
 # Constants
 EMOJI = '💰'
@@ -187,166 +188,69 @@ def log_posted_transaction(transaction_hash: str) -> None:
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_eth_to_usd() -> float:
     try:
-        headers = {'Accept': 'application/json;version=20230302'}
         response = requests.get(
-            f"https://api.geckoterminal.com/api/v2/simple/networks/eth/token_price/{ETH_ADDRESS}",
-            headers=headers,
+            "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+            headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
+            params={'symbol': 'ETH', 'convert': 'USD'},
             timeout=10
         )
         response.raise_for_status()
         data = response.json()
-        logger.debug(f"GeckoTerminal ETH response: {data}")
-        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(ETH_ADDRESS.lower())
-        if not price_str:
-            raise ValueError("Invalid or missing price data from GeckoTerminal")
+        logger.debug(f"CoinMarketCap ETH response: {data}")
+        price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
+        if not price_str or float(price_str) <= 0:
+            raise ValueError("Invalid or missing price data from CoinMarketCap")
         price = float(price_str)
-        if price <= 0:
-            raise ValueError("GeckoTerminal returned non-positive price")
-        logger.info(f"ETH price from GeckoTerminal: ${price:.2f}")
-        time.sleep(0.5)
+        logger.info(f"ETH price from CoinMarketCap: ${price:.2f}")
         return price
-    except Exception as e:
-        logger.error(f"GeckoTerminal ETH price fetch failed: {e}")
-        try:
-            response = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd",
-                timeout=10
-            )
-            response.raise_for_status()
-            data = response.json()
-            logger.debug(f"CoinGecko ETH response: {data}")
-            price = data.get('ethereum', {}).get('usd')
-            if not price or price <= 0:
-                raise ValueError("Invalid or missing price data from CoinGecko")
-            logger.info(f"ETH price from CoinGecko: ${price:.2f}")
-            time.sleep(0.5)
-            return float(price)
-        except Exception as cg_e:
-            logger.error(f"CoinGecko ETH price fetch failed: {cg_e}")
-            if not COINMARKETCAP_API_KEY:
-                logger.warning("Skipping CoinMarketCap due to missing API key")
-                return 3000
-            try:
-                response = requests.get(
-                    "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-                    headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
-                    params={'symbol': 'ETH', 'convert': 'USD'},
-                    timeout=10
-                )
-                response.raise_for_status()
-                data = response.json()
-                logger.debug(f"CoinMarketCap ETH response: {data}")
-                price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
-                if not price_str or float(price_str) <= 0:
-                    raise ValueError("Invalid or missing price data from CoinMarketCap")
-                price = float(price_str)
-                logger.info(f"ETH price from CoinMarketCap: ${price:.2f}")
-                return price
-            except Exception as cmc_e:
-                logger.error(f"CoinMarketCap ETH price fetch failed: {cmc_e}")
-                return 3000
+    except Exception as cmc_e:
+        logger.error(f"CoinMarketCap ETH price fetch failed: {cmc_e}")
+        return 3000
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_pets_price_from_uniswap() -> float:
-    try:
-        headers = {'Accept': 'application/json;version=20230302'}
-        response = requests.get(
-            f"https://api.geckoterminal.com/api/v2/simple/networks/eth/token_price/{CONTRACT_ADDRESS}",
-            headers=headers,
-            timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-        logger.debug(f"GeckoTerminal $PETS response: {data}")
-        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(CONTRACT_ADDRESS.lower())
-        if price_str is None:
-            raise ValueError("Missing price data from GeckoTerminal")
-        price = float(price_str)
-        if price <= 0:
-            raise ValueError("GeckoTerminal returned non-positive price")
-        logger.info(f"$PETS price from GeckoTerminal: ${price:.10f}")
-        time.sleep(0.5)
-        return price
-    except Exception as e:
-        logger.error(f"GeckoTerminal $PETS price fetch failed: {e}")
+    if not COINMARKETCAP_API_KEY:
+        logger.warning("Skipping CoinMarketCap due to missing API key")
+    else:
         try:
             response = requests.get(
-                f"https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses={CONTRACT_ADDRESS}&vs_currencies=usd",
+                "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
+                headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
+                params={'symbol': 'PETS', 'convert': 'USD'},
                 timeout=10
             )
             response.raise_for_status()
             data = response.json()
-            logger.debug(f"CoinGecko $PETS response: {data}")
-            price = data.get(CONTRACT_ADDRESS.lower(), {}).get('usd')
-            if not price or price <= 0:
-                raise ValueError("Invalid or missing price data from CoinGecko")
-            logger.info(f"$PETS price from CoinGecko: ${price:.10f}")
-            time.sleep(0.5)
-            return float(price)
-        except Exception as cg_e:
-            logger.error(f"CoinGecko $PETS price fetch failed: {cg_e}")
-            if not COINMARKETCAP_API_KEY:
-                logger.warning("Skipping CoinMarketCap due to missing API key")
-                try:
-                    pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
-                    pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
-                    reserves = pair_contract.functions.getReserves().call()
-                    token0 = pair_contract.functions.token0().call()
-                    logger.debug(f"Uniswap pair token0: {token0}, reserves: {reserves}")
-                    is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
-                    reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
-                    reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
-                    if reserve_pets <= 0:
-                        raise ValueError("Zero PETS reserve in Uniswap pair")
-                    eth_per_pets = reserve_eth / reserve_pets / 1e18
-                    eth_to_usd = get_eth_to_usd()
-                    price = eth_per_pets * eth_to_usd
-                    if price <= 0:
-                        raise ValueError("Uniswap returned non-positive price")
-                    logger.info(f"$PETS price from Uniswap: ${price:.10f}")
-                    return price
-                except Exception as uni_e:
-                    logger.error(f"Uniswap $PETS price fetch failed: {uni_e}")
-                    return 0.00003886
-            try:
-                response = requests.get(
-                    "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-                    headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
-                    params={'symbol': 'PETS', 'convert': 'USD'},
-                    timeout=10
-                )
-                response.raise_for_status()
-                data = response.json()
-                logger.debug(f"CoinMarketCap $PETS response: {data}")
-                price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price')
-                if not price_str or float(price_str) <= 0:
-                    raise ValueError("Invalid or missing price data from CoinMarketCap")
-                price = float(price_str)
-                logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
-                return price
-            except Exception as cmc_e:
-                logger.error(f"CoinMarketCap $PETS price fetch failed: {cmc_e}")
-                try:
-                    pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
-                    pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
-                    reserves = pair_contract.functions.getReserves().call()
-                    token0 = pair_contract.functions.token0().call()
-                    logger.debug(f"Uniswap pair token0: {token0}, reserves: {reserves}")
-                    is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
-                    reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
-                    reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
-                    if reserve_pets <= 0:
-                        raise ValueError("Zero PETS reserve in Uniswap pair")
-                    eth_per_pets = reserve_eth / reserve_pets / 1e18
-                    eth_to_usd = get_eth_to_usd()
-                    price = eth_per_pets * eth_to_usd
-                    if price <= 0:
-                        raise ValueError("Uniswap returned non-positive price")
-                    logger.info(f"$PETS price from Uniswap: ${price:.10f}")
-                    return price
-                except Exception as uni_e:
-                    logger.error(f"Uniswap $PETS price fetch failed: {uni_e}")
-                    return 0.00003886
+            logger.debug(f"CoinMarketCap $PETS response: {data}")
+            price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price')
+            if not price_str or float(price_str) <= 0:
+                raise ValueError("Invalid or missing price data from CoinMarketCap")
+            price = float(price_str)
+            logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
+            return price
+        except Exception as cmc_e:
+            logger.error(f"CoinMarketCap $PETS price fetch failed: {cmc_e}")
+    try:
+        pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
+        pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
+        reserves = pair_contract.functions.getReserves().call()
+        token0 = pair_contract.functions.token0().call()
+        logger.debug(f"Uniswap pair token0: {token0}, reserves: {reserves}")
+        is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
+        reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
+        reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
+        if reserve_pets <= 0:
+            raise ValueError("Zero PETS reserve in Uniswap pair")
+        eth_per_pets = reserve_eth / reserve_pets / 1e18
+        eth_to_usd = get_eth_to_usd()
+        price = eth_per_pets * eth_to_usd
+        if price <= 0:
+            raise ValueError("Uniswap returned non-positive price")
+        logger.info(f"$PETS price from Uniswap: ${price:.10f}")
+        return price
+    except Exception as uni_e:
+        logger.error(f"Uniswap $PETS price fetch failed: {uni_e}")
+        return 0.00003886
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_token_supply() -> float:
@@ -360,17 +264,16 @@ def get_token_supply() -> float:
         logger.debug(f"Etherscan token supply response: {data}")
         if not isinstance(data, dict) or data.get('status') != '1':
             logger.error(f"Etherscan API error: {data.get('message', 'No message')}")
-            return 6_604_885_020
+            return 10_000_000_000_000  # Fallback for $PETS
         supply_str = data.get('result', '0')
         if not isinstance(supply_str, str) or not supply_str.isdigit():
             raise ValueError("Invalid token supply data from Etherscan")
         supply = int(supply_str) / 1e18
         logger.info(f"Token supply: {supply:,.0f} tokens")
-        time.sleep(0.5)
         return supply
     except Exception as e:
         logger.error(f"Failed to fetch token supply: {e}")
-        return 6_604_885_020
+        return 10_000_000_000_000  # Fallback for $PETS
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def extract_market_cap() -> int:
@@ -504,8 +407,13 @@ async def fetch_etherscan_transactions(startblock: Optional[int] = None, endbloc
         response.raise_for_status()
         data = response.json()
         logger.debug(f"Etherscan transactions response: {data}")
-        if not isinstance(data, dict) or data.get('status') != '1':
-            raise ValueError(f"Invalid Etherscan response: {data.get('message', 'No message')}")
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid Etherscan response: {data}")
+        if data.get('status') == '0' and data.get('message') == 'No transactions found':
+            logger.info("No transactions found in Etherscan response")
+            return []
+        if data.get('status') != '1':
+            raise ValueError(f"Etherscan API error: {data.get('message', 'No message')}")
         transactions = [
             {
                 'transactionHash': tx['hash'],
@@ -653,7 +561,7 @@ async def set_webhook_with_retry(bot_app) -> bool:
     logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
+            async with session.get(f"https://{APP_URL}/health", timeout=15) as response:
                 if response.status != 200:
                     logger.error(f"Health check failed, status {response.status}, response: {await response.text()}")
                     raise Exception(f"Health check failed, status {response.status}")
@@ -939,16 +847,16 @@ async def no_video(update: Update, context) -> None:
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = usd_value / eth_to_usd_rate
         wallet_address = f"0x{random.randint(10**15, 10**16):0x}"
-        emoji_count = min(int(usd_value) // 1, 100)
-        emojis = EMOJI * emoji_count
+        emoji_count = min(int(usd_value), 100)
+        emojis = EMOJI * emoji_count)
         market_cap = extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
-        tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
+        tx_url = f"https://etherscan.io/tx/{test_tx_hash}""
         message = (
             f"🚖 *MicroPets Buy!* Ethereum\n\n"
             f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
+            f"💵 ETH: {eth_value:,.4f} (${test_pets_amount * eth_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
             f"🔼 Holding: {holding_change_text}\n"
             f"🦀 Hodler: {shorten_address(wallet_address)}\n"
@@ -962,7 +870,7 @@ async def no_video(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text="🚖 OK")
     except Exception as e:
         logger.error(f"/noV error: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
 # FastAPI routes
 app = FastAPI()
@@ -971,9 +879,8 @@ app = FastAPI()
 async def health_check():
     logger.info("Health check endpoint called")
     try:
-        if not w3.is_connected():
-            raise Exception("Web3 is not connected")
-        return {"status": "Connected"}
+        # Simplified check to avoid Web3 delays
+        return {"status": "OK"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
@@ -981,7 +888,7 @@ async def health_check():
 @app.get("/webhook")
 async def webhook_get():
     logger.info("Received GET webhook")
-    raise HTTPException(status_code=405, detail="Method Not Allowed")
+    return {"error": "Method Not Allowed"}, 405
 
 @app.get("/api/transactions")
 async def get_transactions():
@@ -993,25 +900,25 @@ async def webhook(request: Request):
     logger.info("Received POST webhook request")
     try:
         async with aiohttp.ClientSession() as session:
-            data = await request.json()
+            data = await request.get_json()
             if not isinstance(data, dict):
                 logger.error(f"Invalid webhook data: {data}")
                 return {"error": "Invalid JSON data"}, 400
-            update = Update.de_json(data, bot_app.bot)
+            update = Update.de_json(data, bot_app.bot.get_updates())
             if update:
                 await bot_app.process_update(update)
-            return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
-        if len(recent_errors) > 5:
-            recent_errors.pop(0)
-        return {"error": "Webhook failed"}, 500
+            return {"status": "ok"}", 200
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
+            recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
+            if len(recent_errors) > 5:
+                recent_errors.pop(0)
+            return {"error": "Webhook failed"}, 500
 
 # Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global monitoring_task, polling_task
+    global bot_app, monitoring_task, polling_task
     logger.info("Starting bot application")
     try:
         await bot_app.initialize()
@@ -1020,9 +927,9 @@ async def lifespan(app: FastAPI):
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
             logger.info("Webhook set successfully")
         except Exception as e:
-            logger.error(f"Webhook setup failed: {e}. Switching to polling")
+            logger.error(f"Webhook setup failed: {str(e)}. Switching to polling")
             polling_task = asyncio.create_task(polling_fallback(bot_app))
-            monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
+            monitoring_task = asyncio.create_task(monitoring_transactions(bot_app))
             logger.info("Polling started, monitoring enabled")
         logger.info("Bot startup completed")
         yield
@@ -1039,29 +946,33 @@ async def lifespan(app: FastAPI):
                     logger.info("Monitoring task cancelled")
                 monitoring_task = None
             if polling_task:
+                polling_task = None
                 polling_task.cancel()
                 try:
                     await polling_task
                 except asyncio.CancelledError:
-                    logger.info("Polling task cancelled")
-                polling_task = None
+                    logger.info("Polling cancelled")
+                    return
+                except Exception as e:
+                    logger.error(f"Error stopping polling: {e}")
             if bot_app.running:
                 try:
                     await bot_app.updater.stop()
                     await bot_app.stop()
+                    await bot_app.shutdown()
                 except Exception as e:
-                    logger.error(f"Error stopping bot: {e}")
-            await bot_app.bot.delete_webhook(drop_pending_updates=True)
-            await bot_app.shutdown()
+                    logger.error(f"Error during shutdown: {e}")
+            await bot_app.bot.delete_webhook(drop_pending_updates=True))
             logger.info("Bot shutdown completed")
+            return
         except Exception as e:
             logger.error(f"Shutdown error: {str(e)}")
 
 app = FastAPI(lifespan=lifespan)
 
 # Bot initialization
-bot_app = ApplicationBuilder() \
-    .token(TELEGRAM_BOT_TOKEN) \
+bot_app = ApplicationBuilder()
+    .token(TELEGRAM_BOT_TOKEN)
     .build()
 bot_app.add_handler(CommandHandler("start", start))
 bot_app.add_handler(CommandHandler("track", track))
@@ -1075,5 +986,5 @@ bot_app.add_handler(CommandHandler("noV", no_video))
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting Uvicorn server on port {PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    logger.info(f"Starting Uvicorn server on port 8080")
+    uvicorn.run(app, host="0.0.0.0", port=8080)
