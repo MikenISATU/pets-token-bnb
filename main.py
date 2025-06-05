@@ -1,5 +1,3 @@
-eth code pets:
-
 import os
 import logging
 import requests
