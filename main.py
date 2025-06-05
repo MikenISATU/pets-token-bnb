@@ -195,12 +195,14 @@ def get_eth_to_usd() -> float:
         )
         response.raise_for_status()
         data = response.json()
-        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(ETH_ADDRESS.lower(), '0')
-        if not isinstance(price_str, (str, float, int)) or not price_str:
-            raise ValueError("Invalid price data from GeckoTerminal")
+        token_prices = data.get('data', {}).get('attributes', {}).get('token_prices', {})
+        price_str = token_prices.get(ETH_ADDRESS.lower())
+        if not price_str or not isinstance(price_str, (str, float, int)):
+            logger.error(f"Invalid ETH price data from GeckoTerminal: {data}")
+            raise ValueError("Invalid or missing ETH price data from GeckoTerminal")
         price = float(price_str)
         if price <= 0:
-            raise ValueError("GeckoTerminal returned non-positive price")
+            raise ValueError("GeckoTerminal returned non-positive ETH price")
         logger.info(f"ETH price from GeckoTerminal: ${price:.2f}")
         time.sleep(0.5)
         return price
@@ -218,12 +220,13 @@ def get_eth_to_usd() -> float:
             )
             response.raise_for_status()
             data = response.json()
-            price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price', '0')
-            if not isinstance(price_str, (str, float, int)) or not price_str:
-                raise ValueError("Invalid price data from CoinMarketCap")
+            price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
+            if not price_str or not isinstance(price_str, (str, float, int)):
+                logger.error(f"Invalid ETH price data from CoinMarketCap: {data}")
+                raise ValueError("Invalid or missing ETH price data from CoinMarketCap")
             price = float(price_str)
             if price <= 0:
-                raise ValueError("CoinMarketCap returned non-positive price")
+                raise ValueError("CoinMarketCap returned non-positive ETH price")
             logger.info(f"ETH price from CoinMarketCap: ${price:.2f}")
             return price
         except Exception as cmc_e:
@@ -241,12 +244,14 @@ def get_pets_price_from_uniswap() -> float:
         )
         response.raise_for_status()
         data = response.json()
-        price_str = data.get('data', {}).get('attributes', {}).get('token_prices', {}).get(CONTRACT_ADDRESS.lower(), '0')
-        if not isinstance(price_str, (str, float, int)) or not price_str:
-            raise ValueError("Invalid price data from GeckoTerminal")
+        token_prices = data.get('data', {}).get('attributes', {}).get('token_prices', {})
+        price_str = token_prices.get(CONTRACT_ADDRESS.lower())
+        if not price_str or not isinstance(price_str, (str, float, int)):
+            logger.error(f"Invalid $PETS price data from GeckoTerminal: {data}")
+            raise ValueError("Invalid or missing $PETS price data from GeckoTerminal")
         price = float(price_str)
         if price <= 0:
-            raise ValueError("GeckoTerminal returned non-positive price")
+            raise ValueError("GeckoTerminal returned non-positive $PETS price")
         logger.info(f"$PETS price from GeckoTerminal: ${price:.10f}")
         time.sleep(0.5)
         return price
@@ -266,7 +271,7 @@ def get_pets_price_from_uniswap() -> float:
                 eth_to_usd = get_eth_to_usd()
                 price = eth_per_pets * eth_to_usd
                 if price <= 0:
-                    raise ValueError("Uniswap returned non-positive price")
+                    raise ValueError("Uniswap returned non-positive $PETS price")
                 logger.info(f"$PETS price from Uniswap: ${price:.10f}")
                 return price
             except Exception as uni_e:
@@ -281,12 +286,13 @@ def get_pets_price_from_uniswap() -> float:
             )
             response.raise_for_status()
             data = response.json()
-            price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price', '0')
-            if not isinstance(price_str, (str, float, int)) or not price_str:
-                raise ValueError("Invalid price data from CoinMarketCap")
+            price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price')
+            if not price_str or not isinstance(price_str, (str, float, int)):
+                logger.error(f"Invalid $PETS price data from CoinMarketCap: {data}")
+                raise ValueError("Invalid or missing $PETS price data from CoinMarketCap")
             price = float(price_str)
             if price <= 0:
-                raise ValueError("CoinMarketCap returned non-positive price")
+                raise ValueError("CoinMarketCap returned non-positive $PETS price")
             logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
             return price
         except Exception as cmc_e:
@@ -303,7 +309,7 @@ def get_pets_price_from_uniswap() -> float:
                 eth_to_usd = get_eth_to_usd()
                 price = eth_per_pets * eth_to_usd
                 if price <= 0:
-                    raise ValueError("Uniswap returned non-positive price")
+                    raise ValueError("Uniswap returned non-positive $PETS price")
                 logger.info(f"$PETS price from Uniswap: ${price:.10f}")
                 return price
             except Exception as uni_e:
@@ -322,8 +328,9 @@ def get_token_supply() -> float:
         if not isinstance(data, dict) or data.get('status') != '1':
             logger.error(f"Etherscan API error: {data.get('message', 'No message')}")
             return 6_604_885_020
-        supply_str = data.get('result', '0')
+        supply_str = data.get('result')
         if not isinstance(supply_str, str) or not supply_str.isdigit():
+            logger.error(f"Invalid token supply data from Etherscan: {data}")
             raise ValueError("Invalid token supply data from Etherscan")
         supply = int(supply_str) / 1e18
         logger.info(f"Token supply: {supply:,.0f} tokens")
@@ -394,7 +401,6 @@ def check_execute_function(transaction_hash: str) -> tuple[bool, Optional[float]
         if not isinstance(result, dict):
             logger.error(f"Invalid result format for transaction {transaction_hash}: {result}")
             return False, None
-        status = result.get('status', '')
         eth_value = get_transaction_details(transaction_hash)
         if eth_value is None:
             logger.error(f"No valid ETH value for transaction {transaction_hash}")
@@ -474,12 +480,13 @@ async def fetch_etherscan_transactions(startblock: Optional[int] = None, endbloc
             for tx in data['result']
             if tx['from'].lower() == TARGET_ADDRESS.lower() and tx['value'].isdigit() and int(tx['value']) > 0
         ]
-        if transactions and not startblock:
-            last_block_number = max(tx['blockNumber'] for tx in transactions)
-        if not startblock:
-            transaction_cache = [tx for tx in transactions if last_block_number is None or tx['blockNumber'] >= last_block_number]
-            transaction_cache = transaction_cache[-1000:]
-            last_transaction_fetch = datetime.now().timestamp() * 1000
+        if transactions:
+            max_block = max(tx['blockNumber'] for tx in transactions)
+            if not startblock or (last_block_number and max_block > last_block_number):
+                last_block_number = max_block
+        transaction_cache.extend([tx for tx in transactions if tx['blockNumber'] >= (last_block_number or 0)])
+        transaction_cache = transaction_cache[-1000:]  # Keep last 1000 transactions
+        last_transaction_fetch = datetime.now().timestamp() * 1000
         logger.info(f"Fetched {len(transactions)} buy transactions, last_block_number={last_block_number}")
         time.sleep(0.5)
         return transactions
@@ -514,17 +521,18 @@ async def send_video_with_retry(context, chat_id: str, video_url: str, options: 
 async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float, pets_price: float, chat_id: str = TELEGRAM_CHAT_ID) -> bool:
     global posted_transactions
     try:
-        if transaction['transactionHash'] in posted_transactions:
-            logger.info(f"Skipping already posted transaction: {transaction['transactionHash']}")
+        tx_hash = transaction['transactionHash']
+        if tx_hash in posted_transactions:
+            logger.info(f"Skipping already posted transaction: {tx_hash}")
             return False
-        is_execute, eth_value = check_execute_function(transaction['transactionHash'])
+        is_execute, eth_value = check_execute_function(tx_hash)
         if eth_value is None or eth_value <= 0:
-            logger.info(f"Skipping transaction {transaction['transactionHash']} with invalid ETH value: {eth_value}")
+            logger.info(f"Skipping transaction {tx_hash} with invalid ETH value: {eth_value}")
             return False
         pets_amount = float(transaction['value']) / 1e18
         usd_value = pets_amount * pets_price
         if usd_value < 50:
-            logger.info(f"Skipping transaction {transaction['transactionHash']} with USD value < 50: {usd_value}")
+            logger.info(f"Skipping transaction {tx_hash} with USD value < 50: {usd_value}")
             return False
         market_cap = extract_market_cap()
         wallet_address = transaction['to']
@@ -532,7 +540,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
         holding_change_text = f"+{percent_increase:.2f}%"
         emoji_count = min(int(usd_value) // 1, 100)
         emojis = EMOJI * emoji_count
-        tx_url = f"https://etherscan.io/tx/{transaction['transactionHash']}"
+        tx_url = f"https://etherscan.io/tx/{tx_hash}"
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
         message = (
@@ -551,9 +559,9 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
         )
         success = await send_video_with_retry(context, chat_id, video_url, {'caption': message, 'parse_mode': 'Markdown'})
         if success:
-            posted_transactions.add(transaction['transactionHash'])
-            log_posted_transaction(transaction['transactionHash'])
-            logger.info(f"Processed transaction {transaction['transactionHash']} for chat {chat_id}")
+            posted_transactions.add(tx_hash)
+            log_posted_transaction(tx_hash)
+            logger.info(f"Processed transaction {tx_hash} for chat {chat_id}")
             return True
         return False
     except Exception as e:
@@ -702,64 +710,54 @@ async def stats(update: Update, context) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching $PETS data for the last 2 weeks")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy transaction")
     try:
         latest_block_response = requests.get(
             f"https://api.etherscan.io/api?module=proxy&action=eth_blockNumber&apikey={ETHERSCAN_API_KEY}",
-            timeout=30
+            timeout=10
         )
         latest_block_response.raise_for_status()
         latest_block_data = latest_block_response.json()
         if not isinstance(latest_block_data, dict) or 'result' not in latest_block_data:
             raise ValueError(f"Invalid block number response: {latest_block_data}")
         latest_block = int(latest_block_data['result'], 16)
-        blocks_per_day = 24 * 60 * 60 // 12  # Ethereum ~12s block time
+        blocks_per_day = 24 * 3600 // 14  # Ethereum ~14s block time
         start_block = latest_block - (14 * blocks_per_day)
         txs = await fetch_etherscan_transactions(startblock=start_block, endblock=latest_block)
         if not txs:
             logger.info("No transactions found for the last 2 weeks")
-            await context.bot.send_message(chat_id=chat_id, text="🚫 No recent buys found")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
             return
         two_weeks_ago = int((datetime.now() - timedelta(days=14)).timestamp())
         recent_txs = [tx for tx in txs if isinstance(tx, dict) and tx.get('timeStamp', 0) >= two_weeks_ago]
         if not recent_txs:
             logger.info("No transactions within the last two weeks")
-            await context.bot.send_message(chat_id=chat_id, text="🚫 No buys found in the last 2 weeks")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No buys found in the last 2 weeks")
+            return
+        latest_tx = max(recent_txs, key=lambda x: x['timeStamp'])
+        if latest_tx['transactionHash'] in posted_transactions.get(latest_tx.transactionHash):
+            logger.info(f"Skipping already posted transaction: {latest_tx['transactionHash']}")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions found")
             return
         eth_to_usd_rate = get_eth_to_usd()
         pets_price = get_pets_price_from_uniswap()
-        processed = []
-        seen_hashes = set()
-        for tx in sorted(recent_txs, key=lambda x: x['timeStamp'], reverse=True):
-            if not isinstance(tx, dict):
-                logger.error(f"Invalid transaction format in stats: {tx}")
-                continue
-            if tx['transactionHash'] in seen_hashes or tx['transactionHash'] in posted_transactions:
-                logger.info(f"Skipping duplicate transaction: {tx['transactionHash']}")
-                continue
-            if await process_transaction(context, tx, eth_to_usd_rate, pets_price, chat_id=TELEGRAM_CHAT_ID):
-                processed.append(tx['transactionHash'])
-            if await process_transaction(context, tx, eth_to_usd_rate, pets_price, chat_id=ADMIN_CHAT_ID):
-                processed.append(tx['transactionHash'])
-            seen_hashes.add(tx['transactionHash'])
-            await asyncio.sleep(30)
-        if processed:
+        success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
+        if success:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ Processed {len(set(processed))} buys from the last 2 weeks:\n" + "\n".join(set(processed)),
+                text=f"✅ Displayed latest buy transaction: {latest_tx['transactionHash']}",
                 parse_mode='Markdown'
             )
         else:
-            logger.info("No transactions met the $50 USD threshold")
-            await context.bot.send_message(chat_id=chat_id, text="🚫 No transactions processed (all below $50 USD)")
+            logger.info(f"Latest transaction {latest_tx['transactionHash']} did not meet criteria")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met the $50 USD threshold")
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to fetch data: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
 
 async def help_command(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id=chat_id,
@@ -768,7 +766,7 @@ async def help_command(update: Update, context) -> None:
             "/start - Start bot\n"
             "/track - Enable alerts\n"
             "/stop - Disable alerts\n"
-            "/stats - View buys from last 2 weeks\n"
+            "/stats - View latest buy\n"
             "/status - Tracking status\n"
             "/test - Test transaction\n"
             "/noV - Test without video\n"
@@ -792,7 +790,6 @@ async def status(update: Update, context) -> None:
 async def debug(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     status = {
         'trackingEnabled': is_tracking_enabled,
@@ -801,7 +798,7 @@ async def debug(update: Update, context) -> None:
         'lastBlockNumber': last_block_number,
         'recentErrors': recent_errors[-5:],
         'apiStatus': {
-            'ethWeb3': bool(w3.is_connected()),
+            'web3': bool(w3.is_connected()),
             'lastTransactionFetch': datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat() if last_transaction_fetch else None
         },
         'pollingActive': polling_task is not None and not polling_task.done()
@@ -817,7 +814,7 @@ async def test(update: Update, context) -> None:
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test buy")
+    await context.bot.send_message(chat_id=chat_id, text="⏖ Generating test...")
     try:
         test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
@@ -827,7 +824,7 @@ async def test(update: Update, context) -> None:
         eth_value = usd_value / eth_to_usd_rate
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
-        wallet_address = f"0x{random.randint(10**15, 10**16):0x}"
+        wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999):0x}"
         emoji_count = min(int(usd_value) // 1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
@@ -842,23 +839,22 @@ async def test(update: Update, context) -> None:
             f"🔼 Holding: {holding_change_text}\n"
             f"🦒 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
-            f"💰 [Staking](https://pets.micropets.io/) "
+            f"[💰 Staking](https://pets.micropets.io/) "
             f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{TARGET_ADDRESS}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await send_video_with_retry(context, chat_id, video_url, {'caption': message, 'parse_mode': 'Markdown'})
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Success")
+        await context.bot.send_message(chat_id=chat_id, text="✅ Success")
     except Exception as e:
-        logger.error(f"Test error: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed: {str(e)}")
+        logger.error(f"Test error: {str(e)}", exc_info=True)
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
 async def no_video(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Testing buy (no video)")
+    await context.bot.send_message(chat_id=chat_id, text="⏖ Testing buy (no video)")
     try:
         test_tx_hash = f"0xTestNoV{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
@@ -866,7 +862,7 @@ async def no_video(update: Update, context) -> None:
         usd_value = test_pets_amount * pets_price
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = usd_value / eth_to_usd_rate
-        wallet_address = f"0x{random.randint(10**15, 10**16):0x}"
+        wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999):0x}"
         emoji_count = min(int(usd_value) // 1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
@@ -878,7 +874,7 @@ async def no_video(update: Update, context) -> None:
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
             f"💵 ETH: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
             f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n"
+            f"🔲 Holding: {holding_change_text}\n"
             f"🦀 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
@@ -887,9 +883,9 @@ async def no_video(update: Update, context) -> None:
             f"[💖 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
-        await context.bot.send_message(chat_id=chat_id, text="🚖 OK")
+        await context.bot.send_message(chat_id=chat_id, text="✅ OK")
     except Exception as e:
-        logger.error(f"/noV error: {e}")
+        logger.error(f"/noV error: {str(e)}", exc_info=True)
         await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
 
 # FastAPI routes
