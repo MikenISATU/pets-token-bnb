@@ -1,4 +1,3 @@
-
 import os
 import logging
 import requests
@@ -13,7 +12,7 @@ from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
 from web3 import Web3
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, wait_exponential, stop_after_attempt
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -50,6 +49,7 @@ PORT = int(os.getenv('PORT', 8080))
 COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
 TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x98b794be9c4f49900c6193aaff20876e1f36043e')
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
+FALLBACK_PETS_PRICE = float(os.getenv('FALLBACK_PETS_PRICE', 0.0005))
 
 missing_vars = []
 for var, name in [
@@ -79,45 +79,6 @@ logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 
 EMOJI = '💰'
 ETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
-UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'
-UNISWAP_V3_POOL_FEES = [500, 3000, 10000]
-UNISWAP_V3_FACTORY_ABI = [
-    {
-        "inputs": [
-            {"internalType": "address", "name": "tokenA", "type": "address"},
-            {"internalType": "address", "name": "tokenB", "type": "address"},
-            {"internalType": "uint24", "name": "fee", "type": "uint24"}
-        ],
-        "name": "getPool",
-        "outputs": [{"internalType": "address", "name": "pool", "type": "address"}],
-        "stateMutability": "view",
-        "type": "function"
-    }
-]
-UNISWAP_V3_POOL_ABI = [
-    {
-        "inputs": [],
-        "name": "slot0",
-        "outputs": [
-            {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
-            {"internalType": "int24", "name": "tick", "type": "int24"},
-            {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
-            {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
-            {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
-            {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
-            {"internalType": "bool", "name": "unlocked", "type": "bool"}
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "token0",
-        "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "stateMutability": "view",
-        "type": "function"
-    }
-]
 cloudinary_videos = {
     'MicroPets Buy': 'SMALLBUY_b3px1p',
     'Medium Bullish Buy': 'MEDIUMBUY_MPEG_e02zdz',
@@ -129,7 +90,6 @@ BUY_THRESHOLDS = {
     'medium': 500,
     'large': 1000
 }
-DEFAULT_PETS_PRICE = 0.0001
 DEFAULT_TOKEN_SUPPLY = 6_604_885_020
 DEFAULT_MARKET_CAP = 256600
 PETS_TOKEN_DECIMALS = 18
@@ -225,7 +185,7 @@ def get_eth_to_usd() -> float:
         logger.error(f"GeckoTerminal fetch failed: {e}")
         if not COINMARKETCAP_API_KEY:
             logger.warning("Skipping CoinMarketCap due to empty API key")
-            return 2609.26  # Fallback price from CoinDesk, June 5, 2025[](https://www.coindesk.com/price/ethereum)
+            return 2609.26  # Fallback price from CoinDesk, June 5, 2025
         try:
             response = requests.get(
                 "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
@@ -234,6 +194,7 @@ def get_eth_to_usd() -> float:
                 timeout=10
             )
             response.raise_for_status()
+            data = response.json()
             price = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
             if not price or price <= 0:
                 raise ValueError("Invalid CoinMarketCap ETH price")
@@ -241,72 +202,7 @@ def get_eth_to_usd() -> float:
             return float(price)
         except Exception as cmc_e:
             logger.error(f"CoinMarketCap fetch failed: {cmc_e}")
-            return 2609.26  # Fallback price[](https://www.coindesk.com/price/ethereum)
-
-@lru_cache(maxsize=1)
-def get_uniswap_v3_pool_address() -> Optional[str]:
-    """Fetch Uniswap V3 pool address for $PETS/WETH pair."""
-    try:
-        factory_contract = w3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS), abi=UNISWAP_V3_FACTORY_ABI)
-        token0 = Web3.to_checksum_address(CONTRACT_ADDRESS)
-        token1 = Web3.to_checksum_address(ETH_ADDRESS)
-        if token0 > token1:
-            token0, token1 = token1, token0
-        for fee in UNISWAP_V3_POOL_FEES:
-            pool_address = factory_contract.functions.getPool(token0, token1, fee).call()
-            if pool_address != '0x0000000000000000000000000000000000000000':
-                logger.info(f"Found Uniswap V3 pool for $PETS/WETH with fee {fee/10000}%: {pool_address}")
-                return pool_address
-        logger.warning("No Uniswap V3 pool found for $PETS/WETH")
-        return None
-    except Exception as e:
-        logger.error(f"Failed to fetch Uniswap V3 pool address: {e}")
-        return None
-
-def get_pets_price_from_uniswap() -> float:
-    """Fetch $PETS price in USD from Uniswap V3 or fallback to CoinGecko."""
-    try:
-        pool_address = get_uniswap_v3_pool_address()
-        if not pool_address:
-            logger.warning("No Uniswap V3 pool found, attempting CoinGecko")
-            try:
-                response = requests.get(
-                    f"https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses={CONTRACT_ADDRESS}&vs_currencies=usd",
-                    timeout=10
-                )
-                response.raise_for_status()
-                data = response.json()
-                price = data.get(CONTRACT_ADDRESS.lower(), {}).get('usd')
-                if not price or price <= 0:
-                    raise ValueError("Invalid CoinGecko $PETS price")
-                logger.info(f"$PETS price from CoinGecko: ${price:.10f}")
-                return float(price)
-            except Exception as cg_e:
-                logger.error(f"CoinGecko fetch failed: {cg_e}, using default price ${DEFAULT_PETS_PRICE}")
-                return DEFAULT_PETS_PRICE
-        pool_contract = w3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI)
-        slot0 = pool_contract.functions.slot0().call()
-        sqrt_price_x96 = slot0[0]
-        token0 = pool_contract.functions.token0().call()
-        is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
-        price = (sqrt_price_x96 ** 2) * (10 ** 18) / (2 ** 192)
-        if is_pets_token0:
-            eth_per_pets = price
-        else:
-            eth_per_pets = 1 / price if price != 0 else 0
-        if eth_per_pets <= 0:
-            logger.error("Invalid Uniswap V3 price calculation")
-            return DEFAULT_PETS_PRICE
-        eth_to_usd = get_eth_to_usd()
-        pets_price_usd = eth_per_pets * eth_to_usd
-        if pets_price_usd <= 0:
-            logger.error("Uniswap V3 returned non-positive $PETS price")
-            return DEFAULT_PETS_PRICE
-        logger.info(f"$PETS price from Uniswap: ${pets_price_usd:.10f}")
-        return pets_price_usd
-    except Exception as e:
-        logger.error(f"Uniswap V3 $PETS price fetch failed: {e}")
-        return DEFAULT_PETS_PRICE
+            return 2609.26  # Fallback price
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_token_supply() -> float:
@@ -332,10 +228,46 @@ def get_token_supply() -> float:
         logger.error(f"Failed to fetch token supply: {e}")
         return DEFAULT_TOKEN_SUPPLY
 
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+def get_pets_price_from_transactions() -> float:
+    """Estimate $PETS price in USD from recent Etherscan transactions."""
+    try:
+        one_day_ago = int((datetime.now() - timedelta(days=1)).timestamp())
+        txs = await fetch_etherscan_transactions()
+        if not txs:
+            logger.warning("No transactions available for price estimation, using fallback price")
+            return FALLBACK_PETS_PRICE
+        recent_txs = [tx for tx in txs if tx['timeStamp'] >= one_day_ago]
+        if not recent_txs:
+            logger.warning("No transactions in the last 24 hours, using fallback price")
+            return FALLBACK_PETS_PRICE
+        eth_to_usd = get_eth_to_usd()
+        prices = []
+        for tx in recent_txs[:5]:  # Use up to 5 recent transactions
+            eth_value = get_transaction_details(tx['transactionHash'])
+            if eth_value is None or eth_value <= 0:
+                continue
+            pets_amount = float(tx['value']) / (10 ** PETS_TOKEN_DECIMALS)
+            if pets_amount <= 0:
+                continue
+            usd_value = eth_value * eth_to_usd
+            price = usd_value / pets_amount
+            if price > 0:
+                prices.append(price)
+        if not prices:
+            logger.warning("No valid transaction prices, using fallback price")
+            return FALLBACK_PETS_PRICE
+        avg_price = sum(prices) / len(prices)
+        logger.info(f"Estimated $PETS price from {len(prices)} transactions: ${avg_price:.10f}")
+        return avg_price
+    except Exception as e:
+        logger.error(f"Failed to estimate $PETS price from transactions: {e}")
+        return FALLBACK_PETS_PRICE
+
 def extract_market_cap() -> int:
     """Calculate $PETS market cap based on price and supply."""
     try:
-        price = get_pets_price_from_uniswap()
+        price = get_pets_price_from_transactions()
         token_supply = get_token_supply()
         market_cap = int(token_supply * price)
         logger.info(f"Market cap for $PETS: ${market_cap:,}")
@@ -491,7 +423,6 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             return False
         pets_amount = float(transaction['value']) / (10 ** PETS_TOKEN_DECIMALS)
         usd_value = eth_value * eth_to_usd_rate
-        pets_usd_value = pets_amount * pets_price
         if usd_value < 50:
             logger.info(f"Skipping transaction {tx_hash} with USD value < 50: {usd_value}")
             return False
@@ -504,7 +435,6 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
         tx_url = f"https://etherscan.io/tx/{tx_hash}"
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
-        pool_address = get_uniswap_v3_pool_address() or "0x0000000000000000000000000000000000000000"
         message = (
             f"🚀 *MicroPets Buy!* Ethereum 💰\n\n"
             f"{emojis}\n"
@@ -515,7 +445,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             f"🦑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View on Etherscan]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{pool_address}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{CONTRACT_ADDRESS}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy $PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -546,7 +476,7 @@ async def monitor_transactions(context) -> None:
                     await asyncio.sleep(POLLING_INTERVAL)
                     continue
                 eth_to_usd_rate = get_eth_to_usd()
-                pets_price = get_pets_price_from_uniswap()
+                pets_price = get_pets_price_from_transactions()
                 new_last_hash = last_transaction_hash
                 for tx in sorted(txs, key=lambda x: x['blockNumber'], reverse=True):
                     if tx['transactionHash'] in posted_transactions:
@@ -692,7 +622,7 @@ async def stats(update: Update, context) -> None:
             await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions")
             return
         eth_to_usd_rate = get_eth_to_usd()
-        pets_price = get_pets_price_from_uniswap()
+        pets_price = get_pets_price_from_transactions()
         success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
         if success:
             await context.bot.send_message(chat_id=chat_id, text=f"✅ Displayed latest buy: {latest_tx['transactionHash']}")
@@ -754,7 +684,6 @@ async def debug(update: Update, context) -> None:
             'lastTransactionFetch': datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat() if last_transaction_fetch else None
         },
         'pollingActive': polling_task is not None and not polling_task.done(),
-        'uniswapPool': get_uniswap_v3_pool_address()
     }
     await context.bot.send_message(
         chat_id=chat_id,
@@ -772,7 +701,7 @@ async def test(update: Update, context) -> None:
     try:
         test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
-        pets_price = get_pets_price_from_uniswap()
+        pets_price = get_pets_price_from_transactions()
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = (test_pets_amount * pets_price) / eth_to_usd_rate if eth_to_usd_rate > 0 else 0.1
         usd_value = eth_value * eth_to_usd_rate
@@ -784,7 +713,6 @@ async def test(update: Update, context) -> None:
         market_cap = extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
-        pool_address = get_uniswap_v3_pool_address() or "0x0000000000000000000000000000000000000000"
         message = (
             f"🚖 *MicroPets Buy!* Test\n\n"
             f"{emojis}\n"
@@ -795,7 +723,7 @@ async def test(update: Update, context) -> None:
             f"🦑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{pool_address}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{CONTRACT_ADDRESS}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🥳 Buy $PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -815,7 +743,7 @@ async def no_video(update: Update, context) -> None:
     try:
         test_tx_hash = f"0xTestNoV{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
-        pets_price = get_pets_price_from_uniswap()
+        pets_price = get_pets_price_from_transactions()
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = (test_pets_amount * pets_price) / eth_to_usd_rate if eth_to_usd_rate > 0 else 0.1
         usd_value = eth_value * eth_to_usd_rate
@@ -825,7 +753,6 @@ async def no_video(update: Update, context) -> None:
         market_cap = extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
-        pool_address = get_uniswap_v3_pool_address() or "0x0000000000000000000000000000000000000000"
         message = (
             f"🚖 *MicroPets Buy!* Ethereum\n\n"
             f"{emojis}\n"
@@ -836,7 +763,7 @@ async def no_video(update: Update, context) -> None:
             f"🦆 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 Link]({tx_url})\n\n"
             f"[💖 Staking](https://pets.micropets.io/petdex) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{pool_address}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{CONTRACT_ADDRESS}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🥳 Buy $PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
