@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 import telegram
 import aiohttp
 import threading
+import importlib.util
 
 # Logging configuration
 logging.basicConfig(
@@ -332,7 +333,7 @@ def check_execute_function(transaction_hash: str) -> Tuple[bool, Optional[float]
         )
         tx_response.raise_for_status()
         tx_data = tx_response.json()
- spiaggia = tx_data['result'].get('input', '')
+        input_data = tx_data['result'].get('input', '')
         is_execute = 'execute' in input_data.lower()
         logger.info(f"Transaction {transaction_hash}: Execute={is_execute}, ETH={eth_value}")
         time.sleep(0.2)
@@ -387,7 +388,7 @@ async def fetch_etherscan_transactions(startblock: Optional[int] = None, endbloc
             if not startblock or (last_block_number and max_block > last_block_number):
                 last_block_number = max_block
         transaction_cache.extend([tx for tx in transactions if tx['blockNumber'] >= (last_block_number or 0)])
-        transaction_cache = transaction_cache[-1000:]
+        transaction_cache = transaction_cache[-1000:]  # Limit cache size
         last_transaction_fetch = datetime.now().timestamp() * 1000
         logger.info(f"Fetched {len(transactions)} buy transactions, last_block_number={last_block_number}")
         time.sleep(0.2)
@@ -429,7 +430,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             logger.info(f"Skipping transaction {tx_hash} with invalid ETH value: {eth_value}")
             return False
         pets_amount = float(transaction['value']) / (10 ** PETS_TOKEN_DECIMALS)
-        usd_value = eth_value_PC_to_usd_rate
+        usd_value = eth_value * eth_to_usd_rate
         if usd_value < 50:
             logger.info(f"Skipping transaction {tx_hash} with USD value < 50: {usd_value}")
             return False
@@ -582,13 +583,11 @@ async def track(update: Update, context) -> None:
         return
     try:
         if is_webhook_mode:
-            # Verify webhook is still active
             webhook_info = await context.bot.get_webhook_info()
             if not webhook_info.url:
                 logger.warning("Webhook not set, attempting to reset")
                 await set_webhook_with_retry(context.bot)
         else:
-            # Ensure polling is running
             if not polling_task or polling_task.done():
                 polling_task = asyncio.create_task(polling_fallback(context.bot))
         is_tracking_enabled = True
@@ -625,7 +624,6 @@ async def stats(update: Update, context) -> None:
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy...")
     try:
-        # Fetch latest block number
         latest_block_response = requests.get(
             f"https://api.etherscan.io/api?module=proxy&action=eth_blockNumber&apikey={ETHERSCAN_API_KEY}",
             timeout=10
