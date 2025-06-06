@@ -87,7 +87,7 @@ ETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
 cloudinary_videos = {
     'MicroPets Buy': 'SMALLBUY_b3px1p',
     'Medium Bullish Buy': 'MEDIUMBUY_MPEG_e02zdz',
-    'Whale Buy': 'micropets_big_msap',
+    'Whale Buy': 'micropets_big_msapxz',
     'Extra Large Buy': 'micropets_big_msapxz'
 }
 BUY_THRESHOLDS = {
@@ -112,7 +112,7 @@ transaction_details_cache: Dict[str, float] = {}
 monitoring_task: Optional[asyncio.Task] = None
 polling_task: Optional[asyncio.Task] = None
 file_lock = threading.Lock()
-is_webhook_mode: bool = True  # Track whether bot is in webhook mode
+is_webhook_mode: bool = True
 
 # Initialize Web3
 try:
@@ -172,7 +172,7 @@ def log_posted_transaction(transaction_hash: str) -> None:
 def get_eth_to_usd() -> float:
     """Fetch ETH to USD price from GeckoTerminal or CoinMarketCap."""
     try:
-        headers = {'Accept': 'application/json;version=20230302'}
+        headers = {'Accept': 'application/jsons;version=20230302'}
         response = requests.get(
             f"https://api.geckoterminal.com/api/v2/simple/networks/eth/token_price/{ETH_ADDRESS}",
             headers=headers,
@@ -190,7 +190,7 @@ def get_eth_to_usd() -> float:
         time.sleep(0.5)
         return price
     except Exception as e:
-        logger.error(f"GeckoTerminal fetch failed: {e}")
+ logger.error(f"GeckoTerminal fetch failed: {e}")
         if not COINMARKETCAP_API_KEY:
             logger.warning("Skipping CoinMarketCap due to empty API key")
             return 2609.26  # Fallback price from CoinDesk, June 5, 2025
@@ -213,7 +213,7 @@ def get_eth_to_usd() -> float:
             return 2609.26  # Fallback price
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-def get_token_supply() -> float:
+async def get_token_supply() -> float:
     """Fetch $PETS token supply from Etherscan."""
     try:
         response = requests.get(
@@ -252,7 +252,7 @@ async def get_pets_price_from_transactions() -> float:
         eth_to_usd = get_eth_to_usd()
         prices = []
         for tx in recent_txs[:5]:  # Use up to 5 recent transactions
-            eth_value = get_transaction_details(tx['transactionHash'])
+            eth_value = await asyncio.get_event_loop().run_in_executor(None, get_transaction_details, tx['transactionHash'])
             if eth_value is None or eth_value <= 0:
                 continue
             pets_amount = float(tx['value']) / (10 ** PETS_TOKEN_DECIMALS)
@@ -272,11 +272,11 @@ async def get_pets_price_from_transactions() -> float:
         logger.error(f"Failed to estimate $PETS price from transactions: {e}")
         return FALLBACK_PETS_PRICE
 
-def extract_market_cap() -> int:
+async def extract_market_cap() -> int:
     """Calculate $PETS market cap based on price and supply."""
     try:
-        price = get_pets_price_from_transactions()
-        token_supply = get_token_supply()
+        price = await get_pets_price_from_transactions()
+        token_supply = await get_token_supply()
         market_cap = int(token_supply * price)
         logger.info(f"Market cap for $PETS: ${market_cap:,}")
         return market_cap
@@ -391,7 +391,7 @@ async def fetch_etherscan_transactions(startblock: Optional[int] = None, endbloc
         transaction_cache = transaction_cache[-1000:]  # Limit cache size
         last_transaction_fetch = datetime.now().timestamp() * 1000
         logger.info(f"Fetched {len(transactions)} buy transactions, last_block_number={last_block_number}")
-        time.sleep(0.2)
+        time JM.sleep(0.2)
         return transactions
     except Exception as e:
         logger.error(f"Failed to fetch Etherscan transactions: {e}")
@@ -425,7 +425,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
         if tx_hash in posted_transactions:
             logger.info(f"Skipping already posted transaction: {tx_hash}")
             return False
-        is_execute, eth_value = check_execute_function(tx_hash)
+        is_execute, eth_value = await asyncio.get_event_loop().run_in_executor(None, check_execute_function, tx_hash)
         if eth_value is None or eth_value <= 0:
             logger.info(f"Skipping transaction {tx_hash} with invalid ETH value: {eth_value}")
             return False
@@ -434,7 +434,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
         if usd_value < 50:
             logger.info(f"Skipping transaction {tx_hash} with USD value < 50: {usd_value}")
             return False
-        market_cap = extract_market_cap()
+        market_cap = await extract_market_cap()
         wallet_address = transaction['to']
         percent_increase = random.uniform(10, 120)
         holding_change_text = f"+{percent_increase:.2f}%"
@@ -532,34 +532,23 @@ async def polling_fallback(bot_app) -> None:
     global polling_task, is_webhook_mode
     logger.info("Starting polling fallback")
     is_webhook_mode = False
+    if not polling_task or polling_task.done():
+        polling_task = asyncio.create_task(bot_app.updater.start_polling(
+            poll_interval=5,
+            timeout=10,
+            drop_pending_updates=True
+        ))
+        logger.info("Polling started successfully")
     while True:
         try:
             if not bot_app.running:
                 await bot_app.initialize()
                 await bot_app.start()
-                await bot_app.updater.start_polling(
-                    poll_interval=5,
-                    timeout=10,
-                    drop_pending_updates=True
-                )
-                logger.info("Polling started successfully")
-                while True:
-                    await asyncio.sleep(60)
-            else:
-                logger.warning("Bot already running")
-                while polling_task and not polling_task.done():
-                    await asyncio.sleep(60)
+                logger.info("Bot started in polling mode")
+            await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Polling error: {e}")
             await asyncio.sleep(10)
-        finally:
-            if bot_app.running and polling_task:
-                try:
-                    await bot_app.updater.stop()
-                    await bot_app.shutdown()
-                    logger.info("Polling stopped")
-                except Exception as e:
-                    logger.error(f"Error stopping polling: {e}")
 
 def is_admin(update: Update) -> bool:
     """Check if user is an admin."""
@@ -573,7 +562,7 @@ async def start(update: Update, context) -> None:
 
 async def track(update: Update, context) -> None:
     """Handle /track command to start monitoring."""
-    global is_tracking_enabled, monitoring_task, is_webhook_mode
+    global is_tracking_enabled, monitoring_task, is_webhook_mode, polling_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
@@ -600,7 +589,7 @@ async def track(update: Update, context) -> None:
 
 async def stop(update: Update, context) -> None:
     """Handle /stop command to stop monitoring."""
-    global is_tracking_enabled, monitoring_task
+    global is_tracking_enabled, monitoring_task, polling_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
@@ -613,6 +602,13 @@ async def stop(update: Update, context) -> None:
         except asyncio.CancelledError:
             logger.info("Monitoring task cancelled")
         monitoring_task = None
+    if polling_task:
+        polling_task.cancel()
+        try:
+            await polling_task
+        except asyncio.CancelledError:
+            logger.info("Polling task cancelled")
+        polling_task = None
     active_chats.discard(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
 
@@ -735,7 +731,7 @@ async def test(update: Update, context) -> None:
         wallet_address = f"0x{random.randint(1000000000000000, 9999999999999999):0x}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = EMOJI * emoji_count
-        market_cap = extract_market_cap()
+        market_cap = await extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
         message = (
@@ -775,7 +771,7 @@ async def no_video(update: Update, context) -> None:
         wallet_address = f"0x{random.randint(1000000000000000, 9999999999999999):0x}"
         emoji_count = min(int(usd_value) // 10, 100)
         emojis = EMOJI * emoji_count
-        market_cap = extract_market_cap()
+        market_cap = await extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
         message = (
