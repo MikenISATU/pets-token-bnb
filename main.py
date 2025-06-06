@@ -212,10 +212,10 @@ def get_eth_to_usd() -> float:
         time.sleep(0.5)
         return price
     except Exception as e:
-        logger.error(f"GeckoTerminal ETH price fetch failed: {e}, status={getattr(e, 'response', 'N/A') and getattr(e.response, 'status_code', 'N/A')}")
+        logger.error(f"GeckoTerminal fetch failed: {e}, status={getattr(e, 'response', 'N/A').status_code if hasattr(getattr(e, 'response', None), 'status_code') else 'N/A'}")
         if not COINMARKETCAP_API_KEY:
-            logger.warning("Skipping CoinMarketCap due to missing API key")
-            return 3000
+            logger.warning("Skipping CoinMarketCap due to empty API key")
+            return 3000.0
         try:
             response = requests.get(
                 "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
@@ -225,23 +225,20 @@ def get_eth_to_usd() -> float:
             )
             response.raise_for_status()
             data = response.json()
-            price_str = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
-            if not price_str or not isinstance(price_str, (str, float, int)):
-                logger.error(f"Invalid ETH price data from CoinMarketCap: {data}")
-                raise ValueError("Invalid or missing ETH price data from CoinMarketCap")
-            price = float(price_str)
-            if price <= 0:
-                raise ValueError("CoinMarketCap returned non-positive ETH price")
+            price = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
+            if not isinstance(price, (int, float)) or price <= 0:
+                logger.error(f"Invalid CoinMarketCap ETH price data: {data}")
+                raise ValueError("Invalid or missing ETH price from CoinMarketCap")
             logger.info(f"ETH price from CoinMarketCap: ${price:.2f}")
-            return price
+            return float(price)
         except Exception as cmc_e:
-            logger.error(f"CoinMarketCap ETH price fetch failed: {cmc_e}")
-            return 3000
+            logger.error(f"CoinMarketCap fetch failed: {cmc_e}")
+            return 3000.0
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_uniswap_v3_pool_address() -> Optional[str]:
     try:
-        factory_contract = w3.eth.contract(address=UNISWAP_V3_FACTORY_ADDRESS, abi=UNISWAP_V3_FACTORY_ABI)
+        factory_contract = w3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS), abi=UNISWAP_V3_FACTORY_ABI)
         token0 = Web3.to_checksum_address(CONTRACT_ADDRESS)
         token1 = Web3.to_checksum_address(ETH_ADDRESS)
         if token0 > token1:
@@ -283,7 +280,7 @@ def get_pets_price_from_uniswap() -> float:
             logger.error("Uniswap V3 returned non-positive $PETS price")
             raise ValueError("Uniswap V3 returned non-positive $PETS price")
         
-        logger.info(f"$PETS price from Uniswap V3: ${pets_price_usd:.10f} (ETH per $PETS: {eth_per_pets:.10f})")
+        logger.info(f"$PETS price from Uniswap: ${pets_price_usd:.10f}")
         return pets_price_usd
     except Exception as e:
         logger.error(f"Uniswap V3 $PETS price fetch failed: {e}")
@@ -653,7 +650,7 @@ async def track(update: Update, context) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     if is_tracking_enabled and monitoring_task:
         await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled")
@@ -667,7 +664,7 @@ async def stop(update: Update, context) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     is_tracking_enabled = False
     if monitoring_task:
@@ -678,12 +675,12 @@ async def stop(update: Update, context) -> None:
             logger.info("Monitoring task cancelled")
         monitoring_task = None
     active_chats.discard(str(chat_id))
-    await context.bot.send_message(chat_id=chat_id, text="✅ Stopped")
+    await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
 
 async def stats(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy transaction")
     try:
@@ -701,18 +698,18 @@ async def stats(update: Update, context) -> None:
         txs = await fetch_etherscan_transactions(startblock=start_block, endblock=latest_block)
         if not txs:
             logger.info("No transactions found for the last 2 weeks")
-            await context.bot.send_message(chat_id=chat_id, text="✅ No recent buys found")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
             return
         two_weeks_ago = int((datetime.now() - timedelta(days=14)).timestamp())
         recent_txs = [tx for tx in txs if isinstance(tx, dict) and tx.get('timeStamp', 0) >= two_weeks_ago]
         if not recent_txs:
             logger.info("No transactions within two weeks")
-            await context.bot.send_message(chat_id=chat_id, text="✅ No buys found in the last 2 weeks")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No buys found in the last 2 weeks")
             return
         latest_tx = max(recent_txs, key=lambda x: x['timeStamp'])
         if latest_tx['transactionHash'] in posted_transactions:
             logger.info(f"Skipping already posted transaction: {latest_tx['transactionHash']}")
-            await context.bot.send_message(chat_id=chat_id, text="✅ No new transactions found")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions found")
             return
         eth_to_usd_rate = get_eth_to_usd()
         pets_price = get_pets_price_from_uniswap()
@@ -725,7 +722,7 @@ async def stats(update: Update, context) -> None:
             )
         else:
             logger.info(f"Latest transaction {latest_tx['transactionHash']} did not meet criteria")
-            await context.bot.send_message(chat_id=chat_id, text="✅ No transactions met the $50 USD threshold")
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met the $50 USD threshold")
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
         await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
@@ -737,7 +734,7 @@ async def help_command(update: Update, context) -> None:
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            "🆘🚖 *Commands*:\n\n"
+            "🆘 *Commands*:\n\n"
             "/start - Start bot\n"
             "/track - Enable alerts\n"
             "/stop - Disable alerts\n"
@@ -754,7 +751,7 @@ async def help_command(update: Update, context) -> None:
 async def status(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id=chat_id,
@@ -787,7 +784,7 @@ async def debug(update: Update, context) -> None:
 async def test(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test...")
     try:
@@ -807,12 +804,12 @@ async def test(update: Update, context) -> None:
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
         message = (
             f"🚖 *MicroPets Buy!* Test\n\n"
-            f"{emojis}\n\n"
+            f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH Value: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
-            f"{🏦} MarketCap: ${market_cap:,.0f}\n"
-            f"{🔼} Holding: {holding_change_text}\n"
-            f"{🦒} Hodler: {shorten_address(wallet_address)}\n"
+            f"💵 ETH Value: {eth_value:,.4f} (${eth_value * eth_to_usd_rate:,.2f})\n"
+            f":bank: Market Cap: ${market_cap:,.0f}\n"
+            f":up_arrow: Holding: {holding_change_text}\n"
+            f":whale: Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
             f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
@@ -837,20 +834,20 @@ async def no_video(update: Update, context) -> None:
         usd_value = test_pets_amount * pets_price
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = usd_value / eth_to_usd_rate
-        wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999_999):0x}"
+        wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999):0x}"
         emoji_count = min(int(usd_value) // 1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
-        holding_change_text = f"+{random.uniform(10, 120):.2f}"
+        holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
         message = (
             f"🚖 *MicroPets Buy!* Ethereum\n\n"
             f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"${💵} ETH Value: ${eth_value:,.4f} (${{eth_value * eth_to_usd_rate):,.2f})\n"
-            f"{🏦} MarketCap: ${market_cap:,.0f}\n"
-            f"{🔲} Holding:{holding_change_text}\n"
-            f"{🦀} Hodler:{shorten_address(wallet_address)}\n"
+            f"💵 ETH Value: {eth_value:,.4f} (${eth_value * eth_to_usd_rate:,.2f})\n"
+            f":bank: Market Cap: ${market_cap:,.0f}\n"
+            f":up_arrow: Holding: {holding_change_text}\n"
+            f":whale: Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 Link]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
             f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
@@ -874,7 +871,7 @@ async def health_check():
         return {"status": "Connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=5003, detail=f"Service unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
 
 @app.get("/webhook")
 async def webhook_get():
@@ -895,17 +892,16 @@ async def webhook(request: Request):
             if not isinstance(data, dict):
                 logger.error(f"Invalid webhook data: {data}")
                 return {"error": "Invalid JSON data"}, 400
-            update = Update.de_json_data(data, bot_app.bot)
+            update = Update.de_json(data, bot_app.bot)
             if update:
                 await bot_app.process_update(update)
             return {"status": "ok"}
-        
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        recent_errors.append({"time": datetime.now().isoformat(), 'error': str(e)})
+        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
         if len(recent_errors) > 5:
             recent_errors.pop(0)
-        return errors{"error": "Webhook failed"}, 500
+        return {"error": "Webhook failed"}, 500
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
