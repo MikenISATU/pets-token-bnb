@@ -7,7 +7,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, List, Set
+from typing import Optional, Dict, List, Set, Tuple
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler
@@ -20,6 +20,7 @@ import telegram
 import aiohttp
 import threading
 import math
+from functools import lru_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,7 +80,7 @@ logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 EMOJI = '💰'
 ETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
 UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'
-UNISWAP_V3_POOL_FEES = [3000, 500, 10000]
+UNISWAP_V3_POOL_FEES = [500, 3000, 10000]  # Reordered to prioritize lower fees
 UNISWAP_V3_FACTORY_ABI = [
     {
         "inputs": [
@@ -128,6 +129,9 @@ BUY_THRESHOLDS = {
     'medium': 500,
     'large': 1000
 }
+DEFAULT_PETS_PRICE = 0.0001  # Fallback price in USD
+DEFAULT_TOKEN_SUPPLY = 6_604_885_020
+DEFAULT_MARKET_CAP = 256600
 
 transaction_cache: List[Dict] = []
 active_chats: Set[str] = {TELEGRAM_CHAT_ID}
@@ -139,8 +143,8 @@ last_transaction_fetch: Optional[float] = None
 TRANSACTION_CACHE_THRESHOLD = 2 * 60 * 1000
 posted_transactions: Set[str] = set()
 transaction_details_cache: Dict[str, float] = {}
-monitoring_task = None
-polling_task = None
+monitoring_task: Optional[asyncio.Task] = None
+polling_task: Optional[asyncio.Task] = None
 file_lock = threading.Lock()
 
 try:
@@ -168,7 +172,9 @@ def categorize_buy(usd_value: float) -> str:
     return 'Extra Large Buy'
 
 def shorten_address(address: str) -> str:
-    return f"{address[:6]}...{address[-4:]}" if address and Web3.is_address(address) else ''
+    if address and Web3.is_address(address):
+        return f"{address[:6]}...{address[-4:]}"
+    return ''
 
 def load_posted_transactions() -> Set[str]:
     try:
@@ -235,7 +241,7 @@ def get_eth_to_usd() -> float:
             logger.error(f"CoinMarketCap fetch failed: {cmc_e}")
             return 3000.0
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+@lru_cache(maxsize=1)
 def get_uniswap_v3_pool_address() -> Optional[str]:
     try:
         factory_contract = w3.eth.contract(address=Web3.to_checksum_address(UNISWAP_V3_FACTORY_ADDRESS), abi=UNISWAP_V3_FACTORY_ABI)
@@ -248,16 +254,18 @@ def get_uniswap_v3_pool_address() -> Optional[str]:
             if pool_address != '0x0000000000000000000000000000000000000000':
                 logger.info(f"Found Uniswap V3 pool for $PETS/WETH with fee {fee/10000}%: {pool_address}")
                 return pool_address
-        logger.error("No Uniswap V3 pool found for $PETS/WETH")
-        raise ValueError("No Uniswap V3 pool found for $PETS/WETH")
+        logger.warning("No Uniswap V3 pool found for $PETS/WETH")
+        return None
     except Exception as e:
         logger.error(f"Failed to fetch Uniswap V3 pool address: {e}")
-        raise
+        return None
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_pets_price_from_uniswap() -> float:
     try:
         pool_address = get_uniswap_v3_pool_address()
+        if not pool_address:
+            logger.warning(f"No Uniswap V3 pool found for $PETS/WETH, using default price ${DEFAULT_PETS_PRICE}")
+            return DEFAULT_PETS_PRICE
         pool_contract = w3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI)
         slot0 = pool_contract.functions.slot0().call()
         sqrt_price_x96 = slot0[0]
@@ -272,19 +280,19 @@ def get_pets_price_from_uniswap() -> float:
         
         if eth_per_pets <= 0:
             logger.error("Invalid Uniswap V3 price calculation: eth_per_pets <= 0")
-            raise ValueError("Invalid Uniswap V3 price calculation")
+            return DEFAULT_PETS_PRICE
         
         eth_to_usd = get_eth_to_usd()
         pets_price_usd = eth_per_pets * eth_to_usd
         if pets_price_usd <= 0:
             logger.error("Uniswap V3 returned non-positive $PETS price")
-            raise ValueError("Uniswap V3 returned non-positive $PETS price")
+            return DEFAULT_PETS_PRICE
         
         logger.info(f"$PETS price from Uniswap: ${pets_price_usd:.10f}")
         return pets_price_usd
     except Exception as e:
         logger.error(f"Uniswap V3 $PETS price fetch failed: {e}")
-        raise ValueError(f"Uniswap V3 price fetch failed: {str(e)}")
+        return DEFAULT_PETS_PRICE
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_token_supply() -> float:
@@ -297,7 +305,7 @@ def get_token_supply() -> float:
         data = response.json()
         if not isinstance(data, dict) or data.get('status') != '1':
             logger.error(f"Etherscan API error: {data.get('message', 'No message')}")
-            return 6_604_885_020
+            return DEFAULT_TOKEN_SUPPLY
         supply_str = data.get('result')
         if not isinstance(supply_str, str) or not supply_str.isdigit():
             logger.error(f"Invalid token supply data from Etherscan: {data}")
@@ -308,9 +316,8 @@ def get_token_supply() -> float:
         return supply
     except Exception as e:
         logger.error(f"Failed to fetch token supply: {e}")
-        return 6_604_885_020
+        return DEFAULT_TOKEN_SUPPLY
 
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def extract_market_cap() -> int:
     try:
         price = get_pets_price_from_uniswap()
@@ -320,7 +327,7 @@ def extract_market_cap() -> int:
         return market_cap
     except Exception as e:
         logger.error(f"Failed to calculate market cap: {e}")
-        return 256600
+        return DEFAULT_MARKET_CAP
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_transaction_details(transaction_hash: str) -> Optional[float]:
@@ -356,7 +363,7 @@ def get_transaction_details(transaction_hash: str) -> Optional[float]:
         return None
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-def check_execute_function(transaction_hash: str) -> tuple[bool, Optional[float]]:
+def check_execute_function(transaction_hash: str) -> Tuple[bool, Optional[float]]:
     try:
         response = requests.get(
             f"https://api.etherscan.io/api?module=transaction&action=gettxreceiptstatus&txhash={transaction_hash}&apikey={ETHERSCAN_API_KEY}",
@@ -518,6 +525,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
         tx_url = f"https://etherscan.io/tx/{tx_hash}"
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
+        pool_address = get_uniswap_v3_pool_address() or "0x0000000000000000000000000000000000000000"
         message = (
             f"🚀 *MicroPets Buy!* Ethereum 💰\n\n"
             f"{emojis}\n"
@@ -528,7 +536,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             f"🦑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View on Etherscan]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{pool_address}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy $PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -730,6 +738,7 @@ async def stats(update: Update, context) -> None:
 async def help_command(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(
         chat_id=chat_id,
@@ -762,6 +771,7 @@ async def status(update: Update, context) -> None:
 async def debug(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     status = {
         'trackingEnabled': is_tracking_enabled,
@@ -773,7 +783,8 @@ async def debug(update: Update, context) -> None:
             'web3': bool(w3.is_connected()),
             'lastTransactionFetch': datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat() if last_transaction_fetch else None
         },
-        'pollingActive': polling_task is not None and not polling_task.done()
+        'pollingActive': polling_task is not None and not polling_task.done(),
+        'uniswapPool': get_uniswap_v3_pool_address()
     }
     await context.bot.send_message(
         chat_id=chat_id,
@@ -793,7 +804,7 @@ async def test(update: Update, context) -> None:
         pets_price = get_pets_price_from_uniswap()
         usd_value = test_pets_amount * pets_price
         eth_to_usd_rate = get_eth_to_usd()
-        eth_value = usd_value / eth_to_usd_rate
+        eth_value = usd_value / eth_to_usd_rate if eth_to_usd_rate != 0 else 0.0
         category = categorize_buy(usd_value)
         video_url = get_video_url(category)
         wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999):0x}"
@@ -802,17 +813,18 @@ async def test(update: Update, context) -> None:
         market_cap = extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
+        pool_address = get_uniswap_v3_pool_address() or "0x0000000000000000000000000000000000000000"
         message = (
             f"🚖 *MicroPets Buy!* Test\n\n"
             f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH Value: {eth_value:,.4f} (${eth_value * eth_to_usd_rate:,.2f})\n"
-            f":bank: Market Cap: ${market_cap:,.0f}\n"
-            f":up_arrow: Holding: {holding_change_text}\n"
-            f":whale: Hodler: {shorten_address(wallet_address)}\n"
+            f"💵 ETH Value: {eth_value:,.4f} (${usd_value:,.2f})\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔼 Holding: {holding_change_text}\n"
+            f"🦑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
-            f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
+            f"💰 [Staking](https://pets.micropets.io/petdex) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{pool_address}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -825,6 +837,7 @@ async def test(update: Update, context) -> None:
 async def no_video(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏖ Testing buy (no video)")
     try:
@@ -833,24 +846,25 @@ async def no_video(update: Update, context) -> None:
         pets_price = get_pets_price_from_uniswap()
         usd_value = test_pets_amount * pets_price
         eth_to_usd_rate = get_eth_to_usd()
-        eth_value = usd_value / eth_to_usd_rate
+        eth_value = usd_value / eth_to_usd_rate if eth_to_usd_rate != 0 else 0.0
         wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999):0x}"
         emoji_count = min(int(usd_value) // 1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
         holding_change_text = f"+{random.uniform(10, 120):.2f}%"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
+        pool_address = get_uniswap_v3_pool_address() or "0x0000000000000000000000000000000000000000"
         message = (
             f"🚖 *MicroPets Buy!* Ethereum\n\n"
             f"{emojis}\n"
-            f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH Value: {eth_value:,.4f} (${eth_value * eth_to_usd_rate:,.2f})\n"
-            f":bank: Market Cap: ${market_cap:,.0f}\n"
-            f":up_arrow: Holding: {holding_change_text}\n"
-            f":whale: Hodler: {shorten_address(wallet_address)}\n"
+            f"💖 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
+            f"💵 ETH: {eth_value:,.4f} (${usd_value:.2f})\n"
+            f"🏦 Market Cap: ${market_cap:,.0f}\n"
+            f"🔼 Holding: {holding_change_text}\n"
+            f"🦆 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 Link]({tx_url})\n\n"
-            f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
+            f"[💖 Staking](https://pets.moneypets.io/) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{pool_address}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[💖 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -858,7 +872,7 @@ async def no_video(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text="✅ OK")
     except Exception as e:
         logger.error(f"/noV error: {str(e)}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"Test failed: {str(e)}")
 
 app = FastAPI()
 
@@ -871,7 +885,7 @@ async def health_check():
         return {"status": "Connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"Service unavailable: {str(e)}")
 
 @app.get("/webhook")
 async def webhook_get():
@@ -895,13 +909,13 @@ async def webhook(request: Request):
             update = Update.de_json(data, bot_app.bot)
             if update:
                 await bot_app.process_update(update)
-            return {"status": "ok"}
+            return {"status": "OK"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
         if len(recent_errors) > 5:
             recent_errors.pop(0)
-        return {"error": "Webhook failed"}, 500
+        return {"error": "Webhook failed"},  @app.post
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -942,31 +956,31 @@ async def lifespan(app: FastAPI):
             if bot_app.running:
                 try:
                     await bot_app.updater.stop()
-                    await bot_app.stop()
+                    await bot_app.sleep()
                 except Exception as e:
-                    logger.error(f"Error stopping bot: {e}")
-            await bot_app.bot.delete_webhook(drop_pending_updates=True)
-            await bot_app.shutdown()
+                    logger.error(f"Error stopping bot): {e}")
+            await bot_app.bot.delete_webhook(drop_pending_updates=True))
+            await bot_app.async shutdown()
             logger.info("Bot shutdown completed")
         except Exception as e:
-            logger.error(f"Shutdown error: {str(e)}")
+            logger.error(f"Shutdown error: {str(e)}"))
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan))
 
 bot_app = ApplicationBuilder() \
     .token(TELEGRAM_BOT_TOKEN) \
-    .build()
-bot_app.add_handler(CommandHandler("start", start))
-bot_app.add_handler(CommandHandler("track", track))
-bot_app.add_handler(CommandHandler("stop", stop))
-bot_app.add_handler(CommandHandler("stats", stats))
-bot_app.add_handler(CommandHandler("help", help_command))
-bot_app.add_handler(CommandHandler("status", status))
-bot_app.add_handler(CommandHandler("debug", debug))
-bot_app.add_handler(CommandHandler("test", test))
-bot_app.add_handler(CommandHandler("noV", no_video))
+     .build()
+bot_app.add_handler(CommandHandler("start", start)))
+bot_app.add_handler(CommandHandler(("track", track))
+bot_app.add_handler(CommandHandler(("stop", stop)))
+bot_app.add_handler(CommandHandler("stats", stats))) \
+bot_app.add_handler(CommandHandler(("help", help_command)))
+bot_app.add_handler(CommandHandler(("status", status)))
+bot_app.add_handler(CommandHandler("debug", debug))) \
+bot_app.add_handler(CommandHandler("test", test))) \
+            bot_app.add_handler(CommandHandler("noV", no_video))
 
 if __name__ == "__main__":
     import uvicorn
-    logger.info(f"Starting Uvicorn server on port {PORT}")
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    logger.info(f"Starting Uvicorn server on port {PORT}"))
+    uvicorn.run(app, host="0.0.0.0", port=PORT))
