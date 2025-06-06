@@ -15,12 +15,11 @@ from web3 import Web3
 from tenacity import retry, wait_exponential, stop_after_attempt
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-from decimal import Decimal
 import telegram
 import aiohttp
 import threading
-from functools import lru_cache
 
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -31,11 +30,13 @@ httpx_logger.setLevel(logging.WARNING)
 telegram_logger = logging.getLogger("telegram")
 telegram_logger.setLevel(logging.WARNING)
 
+# Verify python-telegram-bot version
 logger.info(f"python-telegram-bot version: {telegram.__version__}")
 if not telegram.__version__.startswith('20'):
     logger.error(f"Expected python-telegram-bot v20.0+, got {telegram.__version__}")
     raise SystemExit(1)
 
+# Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
@@ -51,6 +52,7 @@ TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x98b794be9c4f49900c6193aaff20876e
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 FALLBACK_PETS_PRICE = float(os.getenv('FALLBACK_PETS_PRICE', 0.0005))
 
+# Validate environment variables
 missing_vars = []
 for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
@@ -68,6 +70,7 @@ if missing_vars:
     logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
+# Validate Ethereum address
 if not Web3.is_address(CONTRACT_ADDRESS):
     logger.error(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
     raise ValueError(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
@@ -77,6 +80,7 @@ if not COINMARKETCAP_API_KEY:
 
 logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 
+# Constants
 EMOJI = '💰'
 ETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
 cloudinary_videos = {
@@ -94,6 +98,7 @@ DEFAULT_TOKEN_SUPPLY = 6_604_885_020
 DEFAULT_MARKET_CAP = 256600
 PETS_TOKEN_DECIMALS = 18
 
+# Global state
 transaction_cache: List[Dict] = []
 active_chats: Set[str] = {TELEGRAM_CHAT_ID}
 last_transaction_hash: Optional[str] = None
@@ -106,7 +111,9 @@ transaction_details_cache: Dict[str, float] = {}
 monitoring_task: Optional[asyncio.Task] = None
 polling_task: Optional[asyncio.Task] = None
 file_lock = threading.Lock()
+is_webhook_mode: bool = True  # Track whether bot is in webhook mode
 
+# Initialize Web3
 try:
     w3 = Web3(Web3.HTTPProvider(INFURA_URL, request_kwargs={'timeout': 60}))
     if not w3.is_connected():
@@ -229,7 +236,7 @@ def get_token_supply() -> float:
         return DEFAULT_TOKEN_SUPPLY
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-def get_pets_price_from_transactions() -> float:
+async def get_pets_price_from_transactions() -> float:
     """Estimate $PETS price in USD from recent Etherscan transactions."""
     try:
         one_day_ago = int((datetime.now() - timedelta(days=1)).timestamp())
@@ -325,7 +332,7 @@ def check_execute_function(transaction_hash: str) -> Tuple[bool, Optional[float]
         )
         tx_response.raise_for_status()
         tx_data = tx_response.json()
-        input_data = tx_data['result'].get('input', '')
+ spiaggia = tx_data['result'].get('input', '')
         is_execute = 'execute' in input_data.lower()
         logger.info(f"Transaction {transaction_hash}: Execute={is_execute}, ETH={eth_value}")
         time.sleep(0.2)
@@ -422,7 +429,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             logger.info(f"Skipping transaction {tx_hash} with invalid ETH value: {eth_value}")
             return False
         pets_amount = float(transaction['value']) / (10 ** PETS_TOKEN_DECIMALS)
-        usd_value = eth_value * eth_to_usd_rate
+        usd_value = eth_value_PC_to_usd_rate
         if usd_value < 50:
             logger.info(f"Skipping transaction {tx_hash} with USD value < 50: {usd_value}")
             return False
@@ -476,7 +483,7 @@ async def monitor_transactions(context) -> None:
                     await asyncio.sleep(POLLING_INTERVAL)
                     continue
                 eth_to_usd_rate = get_eth_to_usd()
-                pets_price = get_pets_price_from_transactions()
+                pets_price = await get_pets_price_from_transactions()
                 new_last_hash = last_transaction_hash
                 for tx in sorted(txs, key=lambda x: x['blockNumber'], reverse=True):
                     if tx['transactionHash'] in posted_transactions:
@@ -501,6 +508,7 @@ async def monitor_transactions(context) -> None:
 @retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
 async def set_webhook_with_retry(bot_app) -> bool:
     """Set Telegram webhook with retries."""
+    global is_webhook_mode
     webhook_url = f"https://{APP_URL}/webhook"
     logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
@@ -511,15 +519,18 @@ async def set_webhook_with_retry(bot_app) -> bool:
         await bot_app.bot.delete_webhook()
         await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
         logger.info(f"Webhook set successfully: {webhook_url}")
+        is_webhook_mode = True
         return True
     except Exception as e:
         logger.error(f"Failed to set webhook: {e}")
+        is_webhook_mode = False
         raise
 
 async def polling_fallback(bot_app) -> None:
     """Fallback to polling if webhook fails."""
-    global polling_task
+    global polling_task, is_webhook_mode
     logger.info("Starting polling fallback")
+    is_webhook_mode = False
     while True:
         try:
             if not bot_app.running:
@@ -561,7 +572,7 @@ async def start(update: Update, context) -> None:
 
 async def track(update: Update, context) -> None:
     """Handle /track command to start monitoring."""
-    global is_tracking_enabled, monitoring_task
+    global is_tracking_enabled, monitoring_task, is_webhook_mode
     chat_id = update.effective_chat.id
     if not is_admin(update):
         await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
@@ -569,10 +580,24 @@ async def track(update: Update, context) -> None:
     if is_tracking_enabled:
         await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled")
         return
-    is_tracking_enabled = True
-    active_chats.add(str(chat_id))
-    monitoring_task = asyncio.create_task(monitor_transactions(context))
-    await context.bot.send_message(chat_id=chat_id, text="🚖 Tracking started")
+    try:
+        if is_webhook_mode:
+            # Verify webhook is still active
+            webhook_info = await context.bot.get_webhook_info()
+            if not webhook_info.url:
+                logger.warning("Webhook not set, attempting to reset")
+                await set_webhook_with_retry(context.bot)
+        else:
+            # Ensure polling is running
+            if not polling_task or polling_task.done():
+                polling_task = asyncio.create_task(polling_fallback(context.bot))
+        is_tracking_enabled = True
+        active_chats.add(str(chat_id))
+        monitoring_task = asyncio.create_task(monitor_transactions(context))
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Tracking started in {'webhook' if is_webhook_mode else 'polling'} mode")
+    except Exception as e:
+        logger.error(f"Failed to start tracking: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚫 Failed to start tracking: {str(e)}")
 
 async def stop(update: Update, context) -> None:
     """Handle /stop command to stop monitoring."""
@@ -600,14 +625,15 @@ async def stats(update: Update, context) -> None:
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy...")
     try:
+        # Fetch latest block number
         latest_block_response = requests.get(
             f"https://api.etherscan.io/api?module=proxy&action=eth_blockNumber&apikey={ETHERSCAN_API_KEY}",
             timeout=10
         )
         latest_block_response.raise_for_status()
         latest_block = int(latest_block_response.json().get('result', '0x0'), 16)
-        blocks_per_day = 24 * 3600 // 14
-        start_block = latest_block - (14 * blocks_per_day)
+        blocks_per_day = 24 * 3600 // 14  # Approximate blocks per day (14s block time)
+        start_block = latest_block - (14 * blocks_per_day)  # Last 14 days
         txs = await fetch_etherscan_transactions(startblock=start_block, endblock=latest_block)
         if not txs:
             await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
@@ -622,7 +648,7 @@ async def stats(update: Update, context) -> None:
             await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions")
             return
         eth_to_usd_rate = get_eth_to_usd()
-        pets_price = get_pets_price_from_transactions()
+        pets_price = await get_pets_price_from_transactions()
         success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
         if success:
             await context.bot.send_message(chat_id=chat_id, text=f"✅ Displayed latest buy: {latest_tx['transactionHash']}")
@@ -663,7 +689,7 @@ async def status(update: Update, context) -> None:
         return
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"🔍 *Status:* {'Enabled' if is_tracking_enabled else 'Disabled'}",
+        text=f"🔍 *Status:* {'Enabled' if is_tracking_enabled else 'Disabled'}, Mode: {'Webhook' if is_webhook_mode else 'Polling'}",
         parse_mode='Markdown'
     )
 
@@ -684,6 +710,7 @@ async def debug(update: Update, context) -> None:
             'lastTransactionFetch': datetime.fromtimestamp(last_transaction_fetch / 1000).isoformat() if last_transaction_fetch else None
         },
         'pollingActive': polling_task is not None and not polling_task.done(),
+        'webhookMode': is_webhook_mode
     }
     await context.bot.send_message(
         chat_id=chat_id,
@@ -701,7 +728,7 @@ async def test(update: Update, context) -> None:
     try:
         test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
-        pets_price = get_pets_price_from_transactions()
+        pets_price = await get_pets_price_from_transactions()
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = (test_pets_amount * pets_price) / eth_to_usd_rate if eth_to_usd_rate > 0 else 0.1
         usd_value = eth_value * eth_to_usd_rate
@@ -743,7 +770,7 @@ async def no_video(update: Update, context) -> None:
     try:
         test_tx_hash = f"0xTestNoV{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
-        pets_price = get_pets_price_from_transactions()
+        pets_price = await get_pets_price_from_transactions()
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = (test_pets_amount * pets_price) / eth_to_usd_rate if eth_to_usd_rate > 0 else 0.1
         usd_value = eth_value * eth_to_usd_rate
@@ -789,6 +816,7 @@ async def health_check():
 
 @app.get("/webhook")
 async def webhook_get():
+    """Handle GET requests to webhook."""
     logger.info("Received GET webhook")
     raise HTTPException(status_code=405, detail="Method Not Allowed")
 
@@ -818,7 +846,7 @@ async def webhook(request: Request):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage FastAPI application lifespan."""
-    global monitoring_task, polling_task
+    global monitoring_task, polling_task, is_webhook_mode
     logger.info("Starting bot application")
     try:
         await bot_app.initialize()
@@ -826,8 +854,10 @@ async def lifespan(app: FastAPI):
             await set_webhook_with_retry(bot_app)
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
             logger.info("Webhook set successfully")
+            is_webhook_mode = True
         except Exception as e:
             logger.error(f"Webhook setup failed: {e}. Switching to polling")
+            is_webhook_mode = False
             polling_task = asyncio.create_task(polling_fallback(bot_app))
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
         yield
@@ -848,9 +878,17 @@ async def lifespan(app: FastAPI):
                 logger.info("Polling task cancelled")
             polling_task = None
         if bot_app.running:
-            await bot_app.updater.stop()
-            await bot_app.shutdown()
-        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+            try:
+                if not is_webhook_mode:
+                    await bot_app.updater.stop()
+                await bot_app.shutdown()
+            except Exception as e:
+                logger.error(f"Error during bot shutdown: {e}")
+        try:
+            await bot_app.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Webhook deleted")
+        except Exception as e:
+            logger.error(f"Error deleting webhook: {e}")
         logger.info("Bot shutdown completed")
 
 app = FastAPI(lifespan=lifespan)
