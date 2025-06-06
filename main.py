@@ -19,8 +19,8 @@ from decimal import Decimal
 import telegram
 import aiohttp
 import threading
+import math
 
-# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -31,13 +31,11 @@ httpx_logger.setLevel(logging.WARNING)
 telegram_logger = logging.getLogger("telegram")
 telegram_logger.setLevel(logging.WARNING)
 
-# Check python-telegram-bot version
 logger.info(f"python-telegram-bot version: {telegram.__version__}")
 if not telegram.__version__.startswith('20'):
     logger.error(f"Expected python-telegram-bot v20.0+, got {telegram.__version__}")
     raise SystemExit(1)
 
-# Load environment variables
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
@@ -52,7 +50,6 @@ COINMARKETCAP_API_KEY = os.getenv('COINMARKETCAP_API_KEY', '')
 TARGET_ADDRESS = os.getenv('TARGET_ADDRESS', '0x98b794be9c4f49900c6193aaff20876e1f36043e')
 POLLING_INTERVAL = int(os.getenv('POLLING_INTERVAL', 60))
 
-# Validate environment variables
 missing_vars = []
 for var, name in [
     (TELEGRAM_BOT_TOKEN, 'TELEGRAM_BOT_TOKEN'),
@@ -63,7 +60,6 @@ for var, name in [
     (CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'),
     (ADMIN_CHAT_ID, 'ADMIN_USER_ID'),
     (TELEGRAM_CHAT_ID, 'TELEGRAM_CHAT_ID'),
-    (TARGET_ADDRESS, 'TARGET_ADDRESS')
 ]:
     if not var:
         missing_vars.append(name)
@@ -71,39 +67,52 @@ if missing_vars:
     logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-# Validate Ethereum addresses
-for addr, name in [(CONTRACT_ADDRESS, 'CONTRACT_ADDRESS'), (TARGET_ADDRESS, 'TARGET_ADDRESS')]:
-    if not Web3.is_address(addr):
-        logger.error(f"Invalid Ethereum address for {name}: {addr}")
-        raise ValueError(f"Invalid Ethereum address for {name}: {addr}")
+if not Web3.is_address(CONTRACT_ADDRESS):
+    logger.error(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
+    raise ValueError(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
 
 if not COINMARKETCAP_API_KEY:
-    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls will be skipped")
+    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls will be skipped for ETH price")
 
 logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 
-# Constants
 EMOJI = '💰'
-UNISWAP_PAIR_ABI = [
+ETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
+UNISWAP_V3_FACTORY_ADDRESS = '0x1F98431c8aD98523631AE4a59f267346ea31F984'
+UNISWAP_V3_POOL_FEES = [3000, 500, 10000]
+UNISWAP_V3_FACTORY_ABI = [
     {
-        "constant": True,
-        "inputs": [],
-        "name": "getReserves",
-        "outputs": [
-            {"internalType": "uint112", "name": "_reserve0", "type": "uint112"},
-            {"internalType": "uint112", "name": "_reserve1", "type": "uint112"},
-            {"internalType": "uint32", "name": "_blockTimestampLast", "type": "uint32"}
+        "inputs": [
+            {"internalType": "address", "name": "tokenA", "type": "address"},
+            {"internalType": "address", "name": "tokenB", "type": "address"},
+            {"internalType": "uint24", "name": "fee", "type": "uint24"}
         ],
-        "payable": False,
+        "name": "getPool",
+        "outputs": [{"internalType": "address", "name": "pool", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+UNISWAP_V3_POOL_ABI = [
+    {
+        "inputs": [],
+        "name": "slot0",
+        "outputs": [
+            {"internalType": "uint160", "name": "sqrtPriceX96", "type": "uint160"},
+            {"internalType": "int24", "name": "tick", "type": "int24"},
+            {"internalType": "uint16", "name": "observationIndex", "type": "uint16"},
+            {"internalType": "uint16", "name": "observationCardinality", "type": "uint16"},
+            {"internalType": "uint16", "name": "observationCardinalityNext", "type": "uint16"},
+            {"internalType": "uint8", "name": "feeProtocol", "type": "uint8"},
+            {"internalType": "bool", "name": "unlocked", "type": "bool"}
+        ],
         "stateMutability": "view",
         "type": "function"
     },
     {
-        "constant": True,
         "inputs": [],
         "name": "token0",
         "outputs": [{"internalType": "address", "name": "", "type": "address"}],
-        "payable": False,
         "stateMutability": "view",
         "type": "function"
     }
@@ -114,14 +123,12 @@ cloudinary_videos = {
     'Whale Buy': 'micropets_big_msap',
     'Extra Large Buy': 'micropets_big_msapxz'
 }
-ETH_ADDRESS = '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'  # WETH on Ethereum
 BUY_THRESHOLDS = {
     'small': 100,
     'medium': 500,
     'large': 1000
 }
 
-# In-memory data
 transaction_cache: List[Dict] = []
 active_chats: Set[str] = {TELEGRAM_CHAT_ID}
 last_transaction_hash: Optional[str] = None
@@ -136,7 +143,6 @@ monitoring_task = None
 polling_task = None
 file_lock = threading.Lock()
 
-# Initialize Web3
 try:
     w3 = Web3(Web3.HTTPProvider(INFURA_URL, request_kwargs={'timeout': 60}))
     if not w3.is_connected():
@@ -146,7 +152,6 @@ except Exception as e:
     logger.error(f"Failed to initialize Web3 with primary URL: {e}")
     raise ValueError("Web3 connection to Infura failed")
 
-# Helper functions
 def get_video_url(category: str) -> str:
     public_id = cloudinary_videos.get(category, 'micropets_big_msapxz')
     video_url = f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/video/upload/v1/{public_id}.mp4"
@@ -210,7 +215,7 @@ def get_eth_to_usd() -> float:
         logger.error(f"GeckoTerminal ETH price fetch failed: {e}, status={getattr(e, 'response', 'N/A') and getattr(e.response, 'status_code', 'N/A')}")
         if not COINMARKETCAP_API_KEY:
             logger.warning("Skipping CoinMarketCap due to missing API key")
-            return 3000  # Fallback ETH price
+            return 3000
         try:
             response = requests.get(
                 "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
@@ -231,53 +236,58 @@ def get_eth_to_usd() -> float:
             return price
         except Exception as cmc_e:
             logger.error(f"CoinMarketCap ETH price fetch failed: {cmc_e}")
-            return 3000  # Fallback ETH price
+            return 3000
+
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+def get_uniswap_v3_pool_address() -> Optional[str]:
+    try:
+        factory_contract = w3.eth.contract(address=UNISWAP_V3_FACTORY_ADDRESS, abi=UNISWAP_V3_FACTORY_ABI)
+        token0 = Web3.to_checksum_address(CONTRACT_ADDRESS)
+        token1 = Web3.to_checksum_address(ETH_ADDRESS)
+        if token0 > token1:
+            token0, token1 = token1, token0
+        for fee in UNISWAP_V3_POOL_FEES:
+            pool_address = factory_contract.functions.getPool(token0, token1, fee).call()
+            if pool_address != '0x0000000000000000000000000000000000000000':
+                logger.info(f"Found Uniswap V3 pool for $PETS/WETH with fee {fee/10000}%: {pool_address}")
+                return pool_address
+        logger.error("No Uniswap V3 pool found for $PETS/WETH")
+        raise ValueError("No Uniswap V3 pool found for $PETS/WETH")
+    except Exception as e:
+        logger.error(f"Failed to fetch Uniswap V3 pool address: {e}")
+        raise
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_pets_price_from_uniswap() -> float:
     try:
-        pair_address = Web3.to_checksum_address(TARGET_ADDRESS)
-        pair_contract = w3.eth.contract(address=pair_address, abi=UNISWAP_PAIR_ABI)
-        reserves = pair_contract.functions.getReserves().call()
-        token0 = pair_contract.functions.token0().call()
+        pool_address = get_uniswap_v3_pool_address()
+        pool_contract = w3.eth.contract(address=Web3.to_checksum_address(pool_address), abi=UNISWAP_V3_POOL_ABI)
+        slot0 = pool_contract.functions.slot0().call()
+        sqrt_price_x96 = slot0[0]
+        token0 = pool_contract.functions.token0().call()
         is_pets_token0 = token0.lower() == CONTRACT_ADDRESS.lower()
-        reserve_pets = reserves[0] if is_pets_token0 else reserves[1]
-        reserve_eth = reserves[1] if is_pets_token0 else reserves[0]
-        if reserve_pets <= 0 or reserve_eth <= 0:
-            logger.error(f"Invalid Uniswap reserves: PETS={reserve_pets}, ETH={reserve_eth}")
-            raise ValueError("Invalid or zero Uniswap reserves")
-        eth_per_pets = reserve_eth / reserve_pets / 1e18
+        
+        price = (sqrt_price_x96 ** 2) * (10 ** 18) / (2 ** 192)
+        if is_pets_token0:
+            eth_per_pets = price
+        else:
+            eth_per_pets = 1 / price if price != 0 else 0
+        
+        if eth_per_pets <= 0:
+            logger.error("Invalid Uniswap V3 price calculation: eth_per_pets <= 0")
+            raise ValueError("Invalid Uniswap V3 price calculation")
+        
         eth_to_usd = get_eth_to_usd()
-        price = eth_per_pets * eth_to_usd
-        if price <= 0:
-            raise ValueError("Uniswap returned non-positive $PETS price")
-        logger.info(f"$PETS price from Uniswap: ${price:.10f}")
-        return price
+        pets_price_usd = eth_per_pets * eth_to_usd
+        if pets_price_usd <= 0:
+            logger.error("Uniswap V3 returned non-positive $PETS price")
+            raise ValueError("Uniswap V3 returned non-positive $PETS price")
+        
+        logger.info(f"$PETS price from Uniswap V3: ${pets_price_usd:.10f} (ETH per $PETS: {eth_per_pets:.10f})")
+        return pets_price_usd
     except Exception as e:
-        logger.error(f"Uniswap $PETS price fetch failed: {e}")
-        if COINMARKETCAP_API_KEY:
-            try:
-                response = requests.get(
-                    "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
-                    headers={'X-CMC_PRO_API_KEY': COINMARKETCAP_API_KEY},
-                    params={'symbol': 'PETS', 'convert': 'USD'},
-                    timeout=10
-                )
-                response.raise_for_status()
-                data = response.json()
-                price_str = data.get('data', {}).get('PETS', {}).get('quote', {}).get('USD', {}).get('price')
-                if not price_str or not isinstance(price_str, (str, float, int)):
-                    logger.error(f"Invalid $PETS price data from CoinMarketCap: {data}")
-                    raise ValueError("Invalid or missing $PETS price data from CoinMarketCap")
-                price = float(price_str)
-                if price <= 0:
-                    raise ValueError("CoinMarketCap returned non-positive $PETS price")
-                logger.info(f"$PETS price from CoinMarketCap: ${price:.10f}")
-                return price
-            except Exception as cmc_e:
-                logger.error(f"CoinMarketCap $PETS price fetch failed: {cmc_e}")
-        logger.warning("Returning fallback $PETS price")
-        return 0.00003886
+        logger.error(f"Uniswap V3 $PETS price fetch failed: {e}")
+        raise ValueError(f"Uniswap V3 price fetch failed: {str(e)}")
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_token_supply() -> float:
@@ -297,7 +307,7 @@ def get_token_supply() -> float:
             raise ValueError("Invalid token supply data from Etherscan")
         supply = int(supply_str) / 1e18
         logger.info(f"Token supply: {supply:,.0f} tokens")
-        time.sleep(0.2)  # Respect Etherscan rate limit (5 req/s)
+        time.sleep(0.2)
         return supply
     except Exception as e:
         logger.error(f"Failed to fetch token supply: {e}")
@@ -313,7 +323,7 @@ def extract_market_cap() -> int:
         return market_cap
     except Exception as e:
         logger.error(f"Failed to calculate market cap: {e}")
-        return 256600  # Fallback: 6,604,885,020 * 0.00003886
+        return 256600
 
 @retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
 def get_transaction_details(transaction_hash: str) -> Optional[float]:
@@ -342,7 +352,7 @@ def get_transaction_details(transaction_hash: str) -> Optional[float]:
         eth_value = float(w3.from_wei(value_wei, 'ether'))
         logger.info(f"Transaction {transaction_hash}: ETH value={eth_value:.6f}")
         transaction_details_cache[transaction_hash] = eth_value
-        time.sleep(0.2)  # Respect Etherscan rate limit
+        time.sleep(0.2)
         return eth_value
     except Exception as e:
         logger.error(f"Failed to fetch transaction details for {transaction_hash}: {e}")
@@ -380,7 +390,7 @@ def check_execute_function(transaction_hash: str) -> tuple[bool, Optional[float]
         input_data = tx_data['result'].get('input', '')
         is_execute = 'execute' in input_data.lower()
         logger.info(f"Transaction {transaction_hash}: Execute={is_execute}, ETH={eth_value}")
-        time.sleep(0.2)  # Respect Etherscan rate limit
+        time.sleep(0.2)
         return is_execute, eth_value
     except Exception as e:
         logger.error(f"Failed to check transaction {transaction_hash}: {e}")
@@ -453,10 +463,10 @@ async def fetch_etherscan_transactions(startblock: Optional[int] = None, endbloc
             if not startblock or (last_block_number and max_block > last_block_number):
                 last_block_number = max_block
         transaction_cache.extend([tx for tx in transactions if tx['blockNumber'] >= (last_block_number or 0)])
-        transaction_cache = transaction_cache[-1000:]  # Keep last 1000 transactions
+        transaction_cache = transaction_cache[-1000:]
         last_transaction_fetch = datetime.now().timestamp() * 1000
         logger.info(f"Fetched {len(transactions)} buy transactions, last_block_number={last_block_number}")
-        time.sleep(0.2)  # Respect Etherscan rate limit
+        time.sleep(0.2)
         return transactions
     except Exception as e:
         logger.error(f"Failed to fetch Etherscan transactions: {e}")
@@ -521,7 +531,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             f"🦑 Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View on Etherscan]({tx_url})\n\n"
             f"💰 [Staking](https://pets.micropets.io/petdex) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{TARGET_ADDRESS}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy $PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -559,12 +569,10 @@ async def monitor_transactions(context) -> None:
                         logger.error(f"Invalid transaction format: {tx}")
                         continue
                     if tx['transactionHash'] in posted_transactions:
-                        logger.info(f"Skipping already posted transaction: {tx['transactionHash']}")
                         continue
                     if last_transaction_hash and tx['transactionHash'] == last_transaction_hash:
                         continue
                     if last_block_number and tx['blockNumber'] <= last_block_number:
-                        logger.info(f"Skipping old transaction {tx['transactionHash']} with block {tx['blockNumber']} <= {last_block_number}")
                         continue
                     if await process_transaction(context, tx, eth_to_usd_rate, pets_price):
                         new_last_hash = tx['transactionHash']
@@ -588,8 +596,8 @@ async def set_webhook_with_retry(bot_app) -> bool:
             async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
                 if response.status != 200:
                     logger.error(f"Health check failed, status {response.status}, response: {await response.text()}")
-                    raise Exception(f"Health check failed, status {response.status}")
-                logger.info(f"Health check passed, status {response.status}")
+                    raise Exception(f"Health check failed: {response.status}")
+                logger.info(f"Health check passed: {response.status}")
         await bot_app.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Deleted existing webhook")
         await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
@@ -618,7 +626,7 @@ async def polling_fallback(bot_app) -> None:
                     await asyncio.sleep(60)
             else:
                 logger.warning("Bot already running, skipping polling start")
-                while polling_task and not polling_task.cancelled():
+                while polling_task and not polling_task.done():
                     await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Polling error: {e}")
@@ -636,7 +644,6 @@ async def polling_fallback(bot_app) -> None:
 def is_admin(update: Update) -> bool:
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
 
-# Command handlers
 async def start(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     active_chats.add(str(chat_id))
@@ -646,7 +653,7 @@ async def track(update: Update, context) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
         return
     if is_tracking_enabled and monitoring_task:
         await context.bot.send_message(chat_id=chat_id, text="🚀 Tracking already enabled")
@@ -660,7 +667,7 @@ async def stop(update: Update, context) -> None:
     global is_tracking_enabled, monitoring_task
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
         return
     is_tracking_enabled = False
     if monitoring_task:
@@ -671,12 +678,12 @@ async def stop(update: Update, context) -> None:
             logger.info("Monitoring task cancelled")
         monitoring_task = None
     active_chats.discard(str(chat_id))
-    await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
+    await context.bot.send_message(chat_id=chat_id, text="✅ Stopped")
 
 async def stats(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
         return
     await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy transaction")
     try:
@@ -689,23 +696,23 @@ async def stats(update: Update, context) -> None:
         if not isinstance(latest_block_data, dict) or 'result' not in latest_block_data:
             raise ValueError(f"Invalid block number response: {latest_block_data}")
         latest_block = int(latest_block_data['result'], 16)
-        blocks_per_day = 24 * 3600 // 14  # Ethereum ~14s block time
+        blocks_per_day = 24 * 3600 // 14
         start_block = latest_block - (14 * blocks_per_day)
         txs = await fetch_etherscan_transactions(startblock=start_block, endblock=latest_block)
         if not txs:
             logger.info("No transactions found for the last 2 weeks")
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
+            await context.bot.send_message(chat_id=chat_id, text="✅ No recent buys found")
             return
         two_weeks_ago = int((datetime.now() - timedelta(days=14)).timestamp())
         recent_txs = [tx for tx in txs if isinstance(tx, dict) and tx.get('timeStamp', 0) >= two_weeks_ago]
         if not recent_txs:
-            logger.info("No transactions within the last two weeks")
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No buys found in the last 2 weeks")
+            logger.info("No transactions within two weeks")
+            await context.bot.send_message(chat_id=chat_id, text="✅ No buys found in the last 2 weeks")
             return
         latest_tx = max(recent_txs, key=lambda x: x['timeStamp'])
         if latest_tx['transactionHash'] in posted_transactions:
             logger.info(f"Skipping already posted transaction: {latest_tx['transactionHash']}")
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions found")
+            await context.bot.send_message(chat_id=chat_id, text="✅ No new transactions found")
             return
         eth_to_usd_rate = get_eth_to_usd()
         pets_price = get_pets_price_from_uniswap()
@@ -718,10 +725,10 @@ async def stats(update: Update, context) -> None:
             )
         else:
             logger.info(f"Latest transaction {latest_tx['transactionHash']} did not meet criteria")
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met the $50 USD threshold")
+            await context.bot.send_message(chat_id=chat_id, text="✅ No transactions met the $50 USD threshold")
     except Exception as e:
         logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
 async def help_command(update: Update, context) -> None:
     chat_id = update.effective_chat.id
@@ -730,16 +737,16 @@ async def help_command(update: Update, context) -> None:
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            "🆘 *Commands:*\n\n"
+            "🆘🚖 *Commands*:\n\n"
             "/start - Start bot\n"
             "/track - Enable alerts\n"
             "/stop - Disable alerts\n"
-            "/stats - View latest buy\n"
-            "/status - Tracking status\n"
+            "/stats - Show latest buy\n"
+            "/status - Check status\n"
             "/test - Test transaction\n"
             "/noV - Test without video\n"
             "/debug - Debug info\n"
-            "/help - This message"
+            "/help - This help\n"
         ),
         parse_mode='Markdown'
     )
@@ -747,7 +754,7 @@ async def help_command(update: Update, context) -> None:
 async def status(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
         return
     await context.bot.send_message(
         chat_id=chat_id,
@@ -780,9 +787,9 @@ async def debug(update: Update, context) -> None:
 async def test(update: Update, context) -> None:
     chat_id = update.effective_chat.id
     if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        await context.bot.send_message(chat_id=chat_id, text="🚖 Unauthorized")
         return
-    await context.bot.send_message(chat_id=chat_id, text="⏖ Generating test...")
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Generating test...")
     try:
         test_tx_hash = f"0xTest{uuid.uuid4().hex[:16]}"
         test_pets_amount = random.randint(1000000, 5000000)
@@ -800,15 +807,15 @@ async def test(update: Update, context) -> None:
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
         message = (
             f"🚖 *MicroPets Buy!* Test\n\n"
-            f"{emojis}\n"
+            f"{emojis}\n\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
             f"💵 ETH Value: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
-            f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔼 Holding: {holding_change_text}\n"
-            f"🦒 Hodler: {shorten_address(wallet_address)}\n"
+            f"{🏦} MarketCap: ${market_cap:,.0f}\n"
+            f"{🔼} Holding: {holding_change_text}\n"
+            f"{🦒} Hodler: {shorten_address(wallet_address)}\n"
             f"[🔍 View]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{TARGET_ADDRESS}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[🤑 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -830,23 +837,23 @@ async def no_video(update: Update, context) -> None:
         usd_value = test_pets_amount * pets_price
         eth_to_usd_rate = get_eth_to_usd()
         eth_value = usd_value / eth_to_usd_rate
-        wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999):0x}"
+        wallet_address = f"0x{random.randint(1_000_000_000_000_000, 9_999_999_999_999_999_999):0x}"
         emoji_count = min(int(usd_value) // 1, 100)
         emojis = EMOJI * emoji_count
         market_cap = extract_market_cap()
-        holding_change_text = f"+{random.uniform(10, 120):.2f}%"
+        holding_change_text = f"+{random.uniform(10, 120):.2f}"
         tx_url = f"https://etherscan.io/tx/{test_tx_hash}"
         message = (
             f"🚖 *MicroPets Buy!* Ethereum\n\n"
             f"{emojis}\n"
             f"💰 [$PETS](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS}): {test_pets_amount:,.0f}\n"
-            f"💵 ETH: {eth_value:,.4f} (${(eth_value * eth_to_usd_rate):,.2f})\n"
-            f"🏦 Market Cap: ${market_cap:,.0f}\n"
-            f"🔲 Holding: {holding_change_text}\n"
-            f"🦀 Hodler: {shorten_address(wallet_address)}\n"
-            f"[🔍]({tx_url})\n\n"
+            f"${💵} ETH Value: ${eth_value:,.4f} (${{eth_value * eth_to_usd_rate):,.2f})\n"
+            f"{🏦} MarketCap: ${market_cap:,.0f}\n"
+            f"{🔲} Holding:{holding_change_text}\n"
+            f"{🦀} Hodler:{shorten_address(wallet_address)}\n"
+            f"[🔍 Link]({tx_url})\n\n"
             f"[💰 Staking](https://pets.micropets.io/) "
-            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{TARGET_ADDRESS}) "
+            f"[📈 Chart](https://www.dextools.io/app/en/ether/pair-explorer/{get_uniswap_v3_pool_address()}) "
             f"[🛍 Merch](https://micropets.store/) "
             f"[💖 Buy](https://app.uniswap.org/#/swap?outputCurrency={CONTRACT_ADDRESS})"
         )
@@ -854,21 +861,20 @@ async def no_video(update: Update, context) -> None:
         await context.bot.send_message(chat_id=chat_id, text="✅ OK")
     except Exception as e:
         logger.error(f"/noV error: {str(e)}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Error: {str(e)}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
-# FastAPI routes
 app = FastAPI()
 
 @app.get("/health")
 async def health_check():
-    logger.info("Health check endpoint called")
+    logger.info("Checking health endpoint")
     try:
         if not w3.is_connected():
-            raise Exception("Web3 is not connected")
+            raise Exception("Web3 not connected")
         return {"status": "Connected"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Service unavailable: {e}")
+        raise HTTPException(status_code=5003, detail=f"Service unavailable: {e}")
 
 @app.get("/webhook")
 async def webhook_get():
@@ -889,18 +895,18 @@ async def webhook(request: Request):
             if not isinstance(data, dict):
                 logger.error(f"Invalid webhook data: {data}")
                 return {"error": "Invalid JSON data"}, 400
-            update = Update.de_json(data, bot_app.bot)
+            update = Update.de_json_data(data, bot_app.bot)
             if update:
                 await bot_app.process_update(update)
             return {"status": "ok"}
+        
     except Exception as e:
         logger.error(f"Webhook error: {e}")
-        recent_errors.append({"time": datetime.now().isoformat(), "error": str(e)})
+        recent_errors.append({"time": datetime.now().isoformat(), 'error': str(e)})
         if len(recent_errors) > 5:
             recent_errors.pop(0)
-        return {"error": "Webhook failed"}, 500
+        return errors{"error": "Webhook failed"}, 500
 
-# Lifespan handler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global monitoring_task, polling_task
@@ -951,7 +957,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Bot initialization
 bot_app = ApplicationBuilder() \
     .token(TELEGRAM_BOT_TOKEN) \
     .build()
