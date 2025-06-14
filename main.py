@@ -1,3 +1,4 @@
+
 import os
 import logging
 import requests
@@ -235,6 +236,7 @@ def get_eth_to_usd() -> float:
                 timeout=10
             )
             response.raise_for_status()
+            data = response.json()  # Fixed: Correct variable name
             price = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
             if not price or price <= 0:
                 raise ValueError("Invalid CoinMarketCap ETH price")
@@ -398,7 +400,75 @@ def check_execute_function(transaction_hash: str) -> Tuple[bool, Optional[float]
         is_execute = 'execute' in input_data.lower()
         logger.info(f"Transaction {transaction_hash}: Execute={is_execute}, ETH={eth_value}")
         time.sleep(0.2)
-        return is_execute,ąż
+        return is_execute, eth_value
+    except Exception as e:
+        logger.error(f"Failed to check transaction {transaction_hash}: {e}")
+        return False, get_transaction_details(transaction_hash)
+
+@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
+async def fetch_alchemy_transactions() -> List[Dict]:
+    """Fetch new token transfer transactions from Alchemy."""
+    global transaction_cache, last_transaction_fetch, last_block_number
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "alchemy_getAssetTransfers",
+                "params": [{
+                    "fromBlock": "0x0",
+                    "toBlock": "latest",
+                    "category": ["token"],
+                    "withMetadata": True,
+                    "contractAddresses": [Web3.to_checksum_address(CONTRACT_ADDRESS)],
+                    "fromAddress": Web3.to_checksum_address(TARGET_ADDRESS),
+                    "maxCount": "0x64",  # 100 transactions in hex
+                    "order": "desc"
+                }]
+            }
+            async with session.post(
+                f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}",
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+                if 'result' not in data or 'transfers' not in data['result']:
+                    logger.info("No transactions found from Alchemy")
+                    return transaction_cache or []
+                transactions = []
+                for tx in data['result']['transfers']:
+                    if tx['from'].lower() != TARGET_ADDRESS.lower() or not tx['rawContract'].get('value'):
+                        continue
+                    try:
+                        value = int(tx['rawContract']['value'], 16)
+                        if value <= 0:
+                            continue
+                        timestamp = int(datetime.fromisoformat(tx['metadata']['blockTimestamp'].replace('Z', '')).timestamp())
+                        transactions.append({
+                            'transactionHash': tx['hash'],
+                            'to': tx['to'],
+                            'from': tx['from'],
+                            'value': str(value),
+                            'blockNumber': int(tx['blockNum'], 16),
+                            'timeStamp': timestamp
+                        })
+                    except (ValueError, KeyError) as e:
+                        logger.warning(f"Skipping invalid transaction {tx.get('hash')}: {e}")
+                        continue
+                if transactions:
+                    max_block = max(tx['blockNumber'] for tx in transactions)
+                    if not last_block_number or max_block > last_block_number:
+                        last_block_number = max_block
+                transaction_cache.extend([tx for tx in transactions if tx['blockNumber'] >= (last_block_number or 0)])
+                transaction_cache = transaction_cache[-1000:]
+                last_transaction_fetch = datetime.now().timestamp() * 1000
+                logger.info(f"Fetched {len(transactions)} buy transactions from Alchemy, last_block_number={last_block_number}")
+                return transactions
+    except Exception as e:
+        logger.error(f"Failed to fetch Alchemy transactions: {e}")
+        return transaction_cache or []
 
 async def send_video_with_retry(context, chat_id: str, video_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
     """Send video with retries on failure."""
@@ -424,7 +494,7 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
     """Process and post a transaction to Telegram."""
     global posted_transactions
     try:
-        tx_hash = transaction真的是transaction['hash']
+        tx_hash = transaction['transactionHash']
         if tx_hash in posted_transactions:
             logger.info(f"Skipping already posted transaction: {tx_hash}")
             return False
@@ -434,7 +504,6 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
             return False
         pets_amount = float(transaction['value']) / (10 ** PETS_TOKEN_DECIMALS)
         usd_value = eth_value * eth_to_usd_rate
-        pets_usd_value = pets_amount * pets_price
         if usd_value < 50:
             logger.info(f"Skipping transaction {tx_hash} with USD value < 50: {usd_value}")
             return False
@@ -472,63 +541,6 @@ async def process_transaction(context, transaction: Dict, eth_to_usd_rate: float
     except Exception as e:
         logger.error(f"Error processing transaction {tx_hash}: {e}")
         return False
-
-@retry(wait=wait_exponential(multiplier=2, min=4, max=20), stop=stop_after_attempt(3))
-async def fetch_alchemy_transactions() -> List[Dict]:
-    """Fetch new token transfer transactions from Alchemy."""
-    global transaction_cache, last_transaction_fetch, last_block_number
-    try:
-        async with aiohttp.ClientSession() as session:
-            payload = {
-                "id": 1,
-                "jsonrpc": "2.0",
-                "method": "alchemy_getAssetTransfers",
-                "params": [{
-                    "fromBlock": "0x0",
-                    "toBlock": "latest",
-                    "category": ["token"],
-                    "withMetadata": True,
-                    "contractAddresses": [Web3.to_checksum_address(CONTRACT_ADDRESS)],
-                    "toAddress": Web3.to_checksum_address(TARGET_ADDRESS),
-                    "maxResults": 100,
-                    "order": "desc"
-                }]
-            }
-            async with session.post(
-                f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}",
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=30
-            ) as response:
-                response.raise_for_status()
-                data = await response.json()
-                if not data.get('result', {}).get('transfers'):
-                    logger.info("No transactions found from Alchemy")
-                    return transaction_cache or []
-                transactions = [
-                    {
-                        'transactionHash': tx['hash'],
-                        'to': tx['to'],
-                        'from': tx['from'],
-                        'value': tx['rawContract']['rawValue'],
-                        'blockNumber': int(tx['blockNum'], 16),
-                        'timeStamp': int(tx['metadata']['blockTimestamp'].replace('T', ' ').split('.')[0].split(' ')[1])
-                    }
-                    for tx in data['result']['transfers']
-                    if tx['from'].lower() == TARGET_ADDRESS.lower() and int(tx['rawContract']['rawValue']) > 0
-                ]
-                if transactions:
-                    max_block = max(tx['blockNumber'] for tx in transactions)
-                    if not last_block_number or max_block > last_block_number:
-                        last_block_number = max_block
-                transaction_cache.extend([tx for tx in transactions if tx['blockNumber'] >= (last_block_number or 0)])
-                transaction_cache = transaction_cache[-1000:]
-                last_transaction_fetch = datetime.now().timestamp() * 1000
-                logger.info(f"Fetched {len(transactions)} buy transactions from Alchemy, last_block_number={last_block_number}")
-                return transactions
-    except Exception as e:
-        logger.error(f"Failed to fetch Alchemy transactions: {e}")
-        return transaction_cache or []
 
 async def monitor_transactions(context) -> None:
     """Monitor Alchemy for new transactions."""
@@ -568,32 +580,60 @@ async def monitor_transactions(context) -> None:
     logger.info("Monitoring task stopped")
     monitoring_task = None
 
-async def stats(update: Update, context) -> None:
-    """Handle /stats command to show latest transaction."""
-    chat_id = update.effective_chat.id
-    if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy...")
+@retry(wait=wait_exponential(multiplier=1, min=2, max=10), stop=stop_after_attempt(5))
+async def set_webhook_with_retry(bot_app) -> bool:
+    """Set Telegram webhook with retries."""
+    webhook_url = f"https://{APP_URL}/webhook"
+    logger.info(f"Attempting to set webhook: {webhook_url}")
     try:
-        txs = await fetch_alchemy_transactions()
-        if not txs:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
-            return
-        latest_tx = max(txs, key=lambda x: x['timeStamp'])
-        if latest_tx['transactionHash'] in posted_transactions:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions")
-            return
-        eth_to_usd_rate = get_eth_to_usd()
-        pets_price = get_pets_price_from_uniswap()
-        success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
-        if success:
-            await context.bot.send_message(chat_id=chat_id, text=f"✅ Displayed latest buy: {latest_tx['transactionHash']}")
-        else:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met $50 threshold")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
+                if response.status != 200:
+                    raise Exception(f"Health check failed: {response.status}")
+        await bot_app.bot.delete_webhook()
+        await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
+        logger.info(f"Webhook set successfully: {webhook_url}")
+        return True
     except Exception as e:
-        logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
+        logger.error(f"Failed to set webhook: {e}")
+        raise
+
+async def polling_fallback(bot_app) -> None:
+    """Fallback to polling if webhook fails."""
+    global polling_task
+    logger.info("Starting polling fallback")
+    while True:
+        try:
+            if not bot_app.running:
+                await bot_app.initialize()
+                await bot_app.start()
+                await bot_app.updater.start_polling(
+                    poll_interval=5,
+                    timeout=10,
+                    drop_pending_updates=True
+                )
+                logger.info("Polling started successfully")
+                while True:
+                    await asyncio.sleep(60)
+            else:
+                logger.warning("Bot already running")
+                while polling_task and not polling_task.done():
+                    await asyncio.sleep(60)
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+            await asyncio.sleep(10)
+        finally:
+            if bot_app.running and polling_task:
+                try:
+                    await bot_app.updater.stop()
+                    await bot_app.shutdown()
+                    logger.info("Polling stopped")
+                except Exception as e:
+                    logger.error(f"Error stopping polling: {e}")
+
+def is_admin(update: Update) -> bool:
+    """Check if user is an admin."""
+    return str(update.effective_chat.id) == ADMIN_CHAT_ID
 
 async def start(update: Update, context) -> None:
     """Handle /start command."""
@@ -633,6 +673,33 @@ async def stop(update: Update, context) -> None:
         monitoring_task = None
     active_chats.discard(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
+
+async def stats(update: Update, context) -> None:
+    """Handle /stats command to show latest transaction."""
+    chat_id = update.effective_chat.id
+    if not is_admin(update):
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        return
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy...")
+    try:
+        txs = await fetch_alchemy_transactions()
+        if not txs:
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
+            return
+        latest_tx = max(txs, key=lambda x: x['timeStamp'])
+        if latest_tx['transactionHash'] in posted_transactions:
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions")
+            return
+        eth_to_usd_rate = get_eth_to_usd()
+        pets_price = get_pets_price_from_uniswap()
+        success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
+        if success:
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ Displayed latest buy: {latest_tx['transactionHash']}")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met $50 threshold")
+    except Exception as e:
+        logger.error(f"Error in /stats: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
 async def help_command(update: Update, context) -> None:
     """Handle /help command."""
