@@ -1,4 +1,3 @@
-
 import os
 import logging
 import requests
@@ -15,8 +14,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler
 from web3 import Web3
 from tenacity import retry, wait_exponential, stop_after_attempt
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import datetime
 import telegram
 import aiohttp
 import threading
@@ -73,9 +71,6 @@ if missing_vars:
 if not Web3.is_address(CONTRACT_ADDRESS):
     logger.error(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
     raise ValueError(f"Invalid Ethereum address for CONTRACT_ADDRESS: {CONTRACT_ADDRESS}")
-
-if not COINMARKETCAP_API_KEY:
-    logger.warning("COINMARKETCAP_API_KEY is empty; CoinMarketCap API calls will be skipped for ETH price")
 
 logger.info(f"Environment loaded successfully. APP_URL={APP_URL}, PORT={PORT}")
 
@@ -152,11 +147,14 @@ file_lock = threading.Lock()
 try:
     w3 = Web3(Web3.HTTPProvider(INFURA_URL, request_kwargs={'timeout': 60}))
     if not w3.is_connected():
-        raise Exception("Primary Infura URL connection failed")
-    logger.info("Successfully initialized Web3 with INFURA_URL")
+        logger.warning("Primary Infura URL connection failed, attempting Alchemy fallback")
+        w3 = Web3(Web3.HTTPProvider(f"https://eth-mainnet.g.alchemy.com/v2/{ALCHEMY_API_KEY}"))
+        if not w3.is_connected():
+            raise Exception("Both Infura and Alchemy connections failed")
+    logger.info("Successfully initialized Web3 connection")
 except Exception as e:
-    logger.error(f"Failed to initialize Web3 with primary URL: {e}")
-    raise ValueError("Web3 connection to Infura failed")
+    logger.error(f"Failed to initialize Web3: {e}")
+    raise ValueError("Web3 connection failed")
 
 def get_video_url(category: str) -> str:
     """Generate Cloudinary video URL for a given category."""
@@ -227,7 +225,7 @@ def get_eth_to_usd() -> float:
         logger.error(f"GeckoTerminal fetch failed: {e}")
         if not COINMARKETCAP_API_KEY:
             logger.warning("Skipping CoinMarketCap due to empty API key")
-            return 2609.26  # Fallback price from CoinDesk, June 5, 2025
+            return 2609.26  # Fallback price
         try:
             response = requests.get(
                 "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest",
@@ -236,7 +234,7 @@ def get_eth_to_usd() -> float:
                 timeout=10
             )
             response.raise_for_status()
-            data = response.json()  # Fixed: Correct variable name
+            data = response.json()
             price = data.get('data', {}).get('ETH', {}).get('quote', {}).get('USD', {}).get('price')
             if not price or price <= 0:
                 raise ValueError("Invalid CoinMarketCap ETH price")
@@ -416,13 +414,13 @@ async def fetch_alchemy_transactions() -> List[Dict]:
                 "jsonrpc": "2.0",
                 "method": "alchemy_getAssetTransfers",
                 "params": [{
-                    "fromBlock": "0x0",
+                    "fromBlock": "0x0" if not last_block_number else hex(last_block_number),
                     "toBlock": "latest",
                     "category": ["token"],
                     "withMetadata": True,
                     "contractAddresses": [Web3.to_checksum_address(CONTRACT_ADDRESS)],
                     "fromAddress": Web3.to_checksum_address(TARGET_ADDRESS),
-                    "maxCount": "0x64",  # 100 transactions in hex
+                    "maxCount": "0x64",
                     "order": "desc"
                 }]
             }
@@ -436,7 +434,7 @@ async def fetch_alchemy_transactions() -> List[Dict]:
                 data = await response.json()
                 if 'result' not in data or 'transfers' not in data['result']:
                     logger.info("No transactions found from Alchemy")
-                    return transaction_cache or []
+                    return transaction_cache
                 transactions = []
                 for tx in data['result']['transfers']:
                     if tx['from'].lower() != TARGET_ADDRESS.lower() or not tx['rawContract'].get('value'):
@@ -459,16 +457,15 @@ async def fetch_alchemy_transactions() -> List[Dict]:
                         continue
                 if transactions:
                     max_block = max(tx['blockNumber'] for tx in transactions)
-                    if not last_block_number or max_block > last_block_number:
-                        last_block_number = max_block
-                transaction_cache.extend([tx for tx in transactions if tx['blockNumber'] >= (last_block_number or 0)])
-                transaction_cache = transaction_cache[-1000:]
-                last_transaction_fetch = datetime.now().timestamp() * 1000
-                logger.info(f"Fetched {len(transactions)} buy transactions from Alchemy, last_block_number={last_block_number}")
+                    last_block_number = max(last_block_number or 0, max_block)
+                    transaction_cache.extend(transactions)
+                    transaction_cache = transaction_cache[-1000:]
+                    last_transaction_fetch = datetime.now().timestamp() * 1000
+                    logger.info(f"Fetched {len(transactions)} buy transactions from Alchemy, last_block_number={last_block_number}")
                 return transactions
     except Exception as e:
         logger.error(f"Failed to fetch Alchemy transactions: {e}")
-        return transaction_cache or []
+        return transaction_cache
 
 async def send_video_with_retry(context, chat_id: str, video_url: str, options: Dict, max_retries: int = 3, delay: int = 2) -> bool:
     """Send video with retries on failure."""
@@ -547,36 +544,28 @@ async def monitor_transactions(context) -> None:
     global last_transaction_hash, last_block_number, is_tracking_enabled, monitoring_task
     logger.info("Starting transaction monitoring")
     while is_tracking_enabled:
-        async with asyncio.Lock():
-            if not is_tracking_enabled:
-                logger.info("Tracking disabled, stopping monitoring")
-                break
-            try:
-                posted_transactions.update(load_posted_transactions())
-                txs = await fetch_alchemy_transactions()
-                if not txs:
-                    await asyncio.sleep(POLLING_INTERVAL)
+        try:
+            posted_transactions.update(load_posted_transactions())
+            txs = await fetch_alchemy_transactions()
+            if not txs:
+                await asyncio.sleep(POLLING_INTERVAL)
+                continue
+            eth_to_usd_rate = get_eth_to_usd()
+            pets_price = get_pets_price_from_uniswap()
+            new_last_hash = last_transaction_hash
+            for tx in sorted(txs, key=lambda x: x['blockNumber'], reverse=True):
+                if tx['transactionHash'] in posted_transactions or tx['transactionHash'] == last_transaction_hash:
                     continue
-                eth_to_usd_rate = get_eth_to_usd()
-                pets_price = get_pets_price_from_uniswap()
-                new_last_hash = last_transaction_hash
-                for tx in sorted(txs, key=lambda x: x['blockNumber'], reverse=True):
-                    if tx['transactionHash'] in posted_transactions:
-                        continue
-                    if last_transaction_hash == tx['transactionHash']:
-                        continue
-                    if last_block_number and tx['blockNumber'] <= last_block_number:
-                        continue
-                    if await process_transaction(context, tx, eth_to_usd_rate, pets_price):
-                        new_last_hash = tx['transactionHash']
-                        last_block_number = max(last_block_number or 0, tx['blockNumber'])
-                last_transaction_hash = new_last_hash
-            except Exception as e:
-                logger.error(f"Error monitoring transactions: {e}")
-                recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
-                if len(recent_errors) > 10:
-                    recent_errors.pop(0)
-            await asyncio.sleep(POLLING_INTERVAL)
+                if await process_transaction(context, tx, eth_to_usd_rate, pets_price):
+                    new_last_hash = tx['transactionHash']
+                    last_block_number = max(last_block_number or 0, tx['blockNumber'])
+            last_transaction_hash = new_last_hash
+        except Exception as e:
+            logger.error(f"Error monitoring transactions: {e}")
+            recent_errors.append({'time': datetime.now().isoformat(), 'error': str(e)})
+            if len(recent_errors) > 10:
+                recent_errors.pop(0)
+        await asyncio.sleep(POLLING_INTERVAL)
     logger.info("Monitoring task stopped")
     monitoring_task = None
 
@@ -590,7 +579,7 @@ async def set_webhook_with_retry(bot_app) -> bool:
             async with session.get(f"https://{APP_URL}/health", timeout=10) as response:
                 if response.status != 200:
                     raise Exception(f"Health check failed: {response.status}")
-        await bot_app.bot.delete_webhook()
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
         await bot_app.bot.set_webhook(webhook_url, allowed_updates=["message", "channel_post"])
         logger.info(f"Webhook set successfully: {webhook_url}")
         return True
@@ -602,38 +591,59 @@ async def polling_fallback(bot_app) -> None:
     """Fallback to polling if webhook fails."""
     global polling_task
     logger.info("Starting polling fallback")
-    while True:
-        try:
-            if not bot_app.running:
-                await bot_app.initialize()
-                await bot_app.start()
-                await bot_app.updater.start_polling(
-                    poll_interval=5,
-                    timeout=10,
-                    drop_pending_updates=True
-                )
-                logger.info("Polling started successfully")
-                while True:
-                    await asyncio.sleep(60)
-            else:
-                logger.warning("Bot already running")
-                while polling_task and not polling_task.done():
-                    await asyncio.sleep(60)
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            await asyncio.sleep(10)
-        finally:
-            if bot_app.running and polling_task:
-                try:
-                    await bot_app.updater.stop()
-                    await bot_app.shutdown()
-                    logger.info("Polling stopped")
-                except Exception as e:
-                    logger.error(f"Error stopping polling: {e}")
+    try:
+        if not bot_app.running:
+            await bot_app.initialize()
+            await bot_app.start()
+            await bot_app.updater.start_polling(
+                poll_interval=5,
+                timeout=10,
+                drop_pending_updates=True
+            )
+            logger.info("Polling started successfully")
+            while polling_task and not polling_task.done():
+                await asyncio.sleep(60)
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+        await asyncio.sleep(10)
+    finally:
+        if bot_app.running:
+            try:
+                await bot_app.stop()
+                logger.info("Polling stopped")
+            except Exception as e:
+                logger.error(f"Error stopping polling: {e}")
 
 def is_admin(update: Update) -> bool:
     """Check if user is an admin."""
     return str(update.effective_chat.id) == ADMIN_CHAT_ID
+
+async def stats(update: Update, context) -> None:
+    """Handle /stats command to show latest transaction."""
+    chat_id = update.effective_chat.id
+    if not is_admin(update):
+        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
+        return
+    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy...")
+    try:
+        txs = await fetch_alchemy_transactions()
+        if not txs:
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
+            return
+        latest_tx = max(txs, key=lambda x: x['timeStamp'])
+        if latest_tx['transactionHash'] in posted_transactions:
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions")
+            return
+        eth_to_usd_rate = get_eth_to_usd()
+        pets_price = get_pets_price_from_uniswap()
+        success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
+        if success:
+            await context.bot.send_message(chat_id=chat_id, text=f"✅ Displayed latest buy: {latest_tx['transactionHash']}")
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met $50 threshold")
+    except Exception as e:
+        logger.error(f"Error in /stats: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
 async def start(update: Update, context) -> None:
     """Handle /start command."""
@@ -673,33 +683,6 @@ async def stop(update: Update, context) -> None:
         monitoring_task = None
     active_chats.discard(str(chat_id))
     await context.bot.send_message(chat_id=chat_id, text="🛑 Stopped")
-
-async def stats(update: Update, context) -> None:
-    """Handle /stats command to show latest transaction."""
-    chat_id = update.effective_chat.id
-    if not is_admin(update):
-        await context.bot.send_message(chat_id=chat_id, text="🚫 Unauthorized")
-        return
-    await context.bot.send_message(chat_id=chat_id, text="⏳ Fetching latest $PETS buy...")
-    try:
-        txs = await fetch_alchemy_transactions()
-        if not txs:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No recent buys found")
-            return
-        latest_tx = max(txs, key=lambda x: x['timeStamp'])
-        if latest_tx['transactionHash'] in posted_transactions:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No new transactions")
-            return
-        eth_to_usd_rate = get_eth_to_usd()
-        pets_price = get_pets_price_from_uniswap()
-        success = await process_transaction(context, latest_tx, eth_to_usd_rate, pets_price, chat_id=chat_id)
-        if success:
-            await context.bot.send_message(chat_id=chat_id, text=f"✅ Displayed latest buy: {latest_tx['transactionHash']}")
-        else:
-            await context.bot.send_message(chat_id=chat_id, text="🚖 No transactions met $50 threshold")
-    except Exception as e:
-        logger.error(f"Error in /stats: {e}")
-        await context.bot.send_message(chat_id=chat_id, text=f"🚖 Failed: {str(e)}")
 
 async def help_command(update: Update, context) -> None:
     """Handle /help command."""
@@ -853,6 +836,7 @@ async def health_check():
     logger.info("Checking health endpoint")
     try:
         if not w3.is_connected():
+            logger.error("Web3 connection check failed")
             raise HTTPException(status_code=503, detail="Web3 not connected")
         return {"status": "ok"}
     except Exception as e:
@@ -903,6 +887,8 @@ async def lifespan(app: FastAPI):
             polling_task = asyncio.create_task(polling_fallback(bot_app))
             monitoring_task = asyncio.create_task(monitor_transactions(bot_app))
         yield
+    except Exception as e:
+        logger.error(f"Lifespan error: {e}")
     finally:
         logger.info("Initiating bot shutdown")
         if monitoring_task:
@@ -920,9 +906,14 @@ async def lifespan(app: FastAPI):
                 logger.info("Polling task cancelled")
             polling_task = None
         if bot_app.running:
-            await bot_app.updater.stop()
-            await bot_app.shutdown()
-        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+            try:
+                await bot_app.stop()
+            except Exception as e:
+                logger.error(f"Error stopping bot: {e}")
+        try:
+            await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Error deleting webhook: {e}")
         logger.info("Bot shutdown completed")
 
 app = FastAPI(lifespan=lifespan)
